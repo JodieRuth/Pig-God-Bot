@@ -1,0 +1,39 @@
+{
+  "/animetrace": [
+    "/识图"
+  ],
+  "/cancel": [],
+  "/clear": [],
+  "/haochi": [
+    "/好吃"
+  ],
+  "/help": [
+    "/帮助"
+  ],
+  "/mcserver": [],
+  "/ping": [],
+  "/quote": [
+    "/收藏"
+  ],
+  "/reboot": [
+    "/重启"
+  ],
+  "/restart": [],
+  "/roll": [],
+  "/rp": [],
+  "/status": [],
+  "/stop": [],
+  "/switch": [],
+  "/test": [],
+  "/zhua": [
+    "猪a",
+    "zhua",
+    "/猪a"
+  ],
+  "/zhubi": [
+    "/猪币"
+  ],
+  "/zhubi_fakuang": [
+    "/发狂"
+  ]
+}
