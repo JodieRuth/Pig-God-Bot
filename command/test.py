@@ -5,6 +5,8 @@ import os
 import time
 from typing import Any
 
+import asyncio
+
 import aiohttp
 import websockets
 
@@ -216,21 +218,53 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         report("当前存在插件：无")
     report()
 
-    all_models: set[str] = set()
-    for config in llm_configs:
+    async def _check_llm(pos: int, config: dict[str, str]) -> tuple[int, list[str], str, tuple[str, str, str] | None]:
         models, models_error = await fetch_models(config)
-        all_models.update(models)
+        test_result = None
+        if models:
+            test_model = openai_model if openai_model in models else models[0]
+            test_status, test_detail = await check_chat(config, test_model)
+            test_result = (test_status, test_detail, test_model)
+        return (pos, models, models_error, test_result)
+
+    async def _check_image(pos: int, config: dict[str, str]) -> tuple[int, list[str], str]:
+        models, models_error = await fetch_models(config)
+        return (pos, models, models_error)
+
+    tasks: list[asyncio.Task[Any]] = []
+    for pos, config in enumerate(llm_configs):
+        tasks.append(asyncio.create_task(_check_llm(pos, config)))
+    for pos, config in enumerate(image_configs, start=len(llm_configs)):
+        tasks.append(asyncio.create_task(_check_image(pos, config)))
+
+    gathered = await asyncio.gather(*tasks)
+
+    all_models_positions: dict[str, list[int]] = {}
+    llm_results: dict[int, tuple[list[str], str, tuple[str, str, str] | None]] = {}
+    image_results: dict[int, tuple[list[str], str]] = {}
+    for result in gathered:
+        if len(result) == 4:
+            pos, models, models_error, test_result = result
+            llm_results[pos] = (models, models_error, test_result)
+        else:
+            pos, models, models_error = result
+            image_results[pos] = (models, models_error)
+        for m in models:
+            all_models_positions.setdefault(m, []).append(pos)
+
+    for pos in sorted(llm_results):
+        models, models_error, test_result = llm_results[pos]
+        config = llm_configs[pos]
         active = " 当前" if config.get("index") == llm_active else ""
         if not models:
             reason = f"models: {models_error}" if models_error else "models: 未获取到模型"
             report(f"LLM #{config.get('index')}{active}: FAIL - {reason}，跳过聊天测试，模型数 0")
             continue
-        test_model = openai_model if openai_model in models else models[0]
-        status, detail = await check_chat(config, test_model)
-        report(f"LLM #{config.get('index')}{active}: {status} - {detail}，测试模型 {test_model}，模型数 {len(models)}")
-    for config in image_configs:
-        models, models_error = await fetch_models(config)
-        all_models.update(models)
+        test_status, test_detail, test_model = test_result  # type: ignore[misc]
+        report(f"LLM #{config.get('index')}{active}: {test_status} - {test_detail}，测试模型 {test_model}，模型数 {len(models)}")
+    for pos in sorted(image_results):
+        models, models_error = image_results[pos]
+        config = image_configs[pos - len(llm_configs)]
         active = " 当前" if config.get("index") == image_active else ""
         if not models:
             detail = models_error or "未获取到模型"
@@ -240,10 +274,18 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         detail = f"models {len(models)}"
         report(f"Image #{config.get('index')}{active}: {status} - {detail}")
 
-    if all_models:
+    if all_models_positions:
         report()
         report("所有可用模型：")
-        report(", ".join(sorted(all_models)))
+        model_list: list[str] = []
+        for model in sorted(all_models_positions.keys()):
+            positions = all_models_positions[model]
+            if len(positions) > 1:
+                for p in positions:
+                    model_list.append(f"{model}#{p}")
+            else:
+                model_list.append(model)
+        report(", ".join(model_list))
 
     await ctx["reply"](event, "\n".join(results))
 

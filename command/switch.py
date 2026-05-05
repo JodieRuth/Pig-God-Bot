@@ -16,12 +16,12 @@ def parse_args(arg: str) -> tuple[str, str] | None:
     return kind, value
 
 
-def api_base(url: str) -> str:
+def models_url_for_request(url: str) -> str:
     value = url.rstrip("/")
-    for suffix in ("/v1/chat/completions", "/v1/responses", "/v1/images/edits", "/v1/images/generations"):
+    for suffix in ("/chat/completions", "/responses", "/images/edits", "/images/generations"):
         if value.endswith(suffix):
-            return value.removesuffix(suffix)
-    return value
+            return value.removesuffix(suffix) + "/models"
+    return value + "/models"
 
 
 async def fetch_models(config: dict[str, str]) -> tuple[list[str], str]:
@@ -29,7 +29,7 @@ async def fetch_models(config: dict[str, str]) -> tuple[list[str], str]:
     if not url:
         return [], "未配置 URL"
     headers = {"Authorization": f"Bearer {config.get('key', '')}"} if config.get("key") else {}
-    models_url = api_base(url) + "/v1/models"
+    models_url = models_url_for_request(url)
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
@@ -75,7 +75,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         return
     parsed = parse_args(arg)
     if parsed is None:
-        await ctx["reply"](event, "用法：/switch llm <modelname>、/switch image <modelname>、/switch prompt <编号> 或 /switch photo true|false")
+        await ctx["reply"](event, "用法：/switch llm <modelname[#N]>、/switch image <modelname[#N]>、/switch prompt <编号> 或 /switch photo true|false")
         return
     kind, value = parsed
     if kind == "photo":
@@ -106,6 +106,34 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         await ctx["reply"](event, f"没有配置 {kind} API。")
         return
 
+    target_pos: int | None = None
+    base_model = model
+    if "#" in model:
+        base_model, _, num_part = model.rpartition("#")
+        if num_part.isdigit():
+            target_pos = int(num_part)
+            if target_pos < 0 or target_pos >= len(configs):
+                await ctx["reply"](event, f"配置位置 #{target_pos} 不存在，当前 {kind} 配置共 {len(configs)} 个（位置 0 到 {len(configs) - 1}）。")
+                return
+        else:
+            await ctx["reply"](event, f"模型名 {model} 格式无效，# 后应为数字。")
+            return
+
+    if target_pos is not None:
+        config = configs[target_pos]
+        models, error = await fetch_models(config)
+        if error:
+            await ctx["reply"](event, f"获取 #{target_pos} 模型列表失败：{error}")
+            return
+        if base_model not in models:
+            available = sorted(models)
+            await ctx["reply"](event, f"#{target_pos} 中没有模型 {base_model}。可用：{', '.join(available) if available else '无'}")
+            return
+        ctx["set_active_runtime"](kind, config["index"], base_model)
+        await ctx["reply"](event, f"已切换 {kind}：API #{config['index']}，模型 {base_model}。已清空暂存上下文。")
+        ctx["clear_contexts"]()
+        return
+
     all_models: dict[str, list[str]] = {}
     errors: dict[str, str] = {}
     for config in configs:
@@ -113,26 +141,37 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         all_models[config["index"]] = models
         if error:
             errors[config["index"]] = error
-        if model in models:
-            ctx["set_active_runtime"](kind, config["index"], model)
-            await ctx["reply"](event, f"已切换 {kind}：API #{config['index']}，模型 {model}。已清空暂存上下文。")
+        if base_model in models:
+            ctx["set_active_runtime"](kind, config["index"], base_model)
+            await ctx["reply"](event, f"已切换 {kind}：API #{config['index']}，模型 {base_model}。已清空暂存上下文。")
             ctx["clear_contexts"]()
             return
 
-    available = sorted({name for names in all_models.values() for name in names})
+    model_positions: dict[str, list[int]] = {}
+    for i, config in enumerate(configs):
+        for m in all_models.get(config["index"], []):
+            model_positions.setdefault(m, []).append(i)
+    available: list[str] = []
+    for m in sorted(model_positions.keys()):
+        positions = model_positions[m]
+        if len(positions) > 1:
+            for p in positions:
+                available.append(f"{m}#{p}")
+        else:
+            available.append(m)
     if available:
         detail = "；".join(f"API #{index}: {error}" for index, error in errors.items())
         suffix = f"\n获取模型时的错误：{detail}" if detail else ""
-        await ctx["reply"](event, f"没有找到模型 {model}。当前可用模型：{', '.join(available)}{suffix}")
+        await ctx["reply"](event, f"没有找到模型 {base_model}。当前可用模型：{', '.join(available)}{suffix}")
         return
     detail = "；".join(f"API #{index}: {error}" for index, error in errors.items())
     suffix = f"错误详情：{detail}" if detail else "没有返回具体错误。"
-    await ctx["reply"](event, f"没有从任何 {kind} API 获取到可用模型，无法切换到 {model}。{suffix}")
+    await ctx["reply"](event, f"没有从任何 {kind} API 获取到可用模型，无法切换到 {base_model}。{suffix}")
 
 
 COMMAND = {
     "name": "/switch",
-    "usage": "/switch llm/image <modelname>、/switch prompt <编号> 或 /switch photo true|false",
+    "usage": "/switch llm/image <modelname[#N]>、/switch prompt <编号> 或 /switch photo true|false",
     "description": "仅所有者可用：切换当前使用的 LLM、图片 API、prompt 或图片输入开关。",
     "handler": handler,
 }
