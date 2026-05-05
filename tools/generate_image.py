@@ -68,6 +68,32 @@ def image_api_url_for_request(has_images: bool, ctx: dict[str, Any]) -> str:
     return image_url
 
 
+async def _parse_image_sse(resp: aiohttp.ClientResponse, ctx: dict[str, Any]) -> str | None:
+    completed = {"image_generation.completed", "image_edit.completed"}
+    while True:
+        line = await resp.content.readline()
+        if not line:
+            break
+        line_str = line.decode("utf-8", errors="replace").strip()
+        if not line_str or not line_str.startswith("data:"):
+            continue
+        data_str = line_str[5:].strip()
+        if not data_str or data_str == "[DONE]":
+            continue
+        try:
+            event = json.loads(data_str)
+        except json.JSONDecodeError:
+            ctx["log"](f"Image SSE unparseable line: {data_str[:200]}")
+            continue
+        event_type = event.get("type", "")
+        if event_type in completed:
+            b64 = event.get("b64_json")
+            if b64:
+                ctx["log"](f"Image SSE completed event: type={event_type} size={len(b64)}")
+                return b64
+    return None
+
+
 async def call_image_api(prompt: str, context_texts: list[str], images: list[dict[str, Any]], ctx: dict[str, Any]) -> Path:
     ctx["reload_runtime_files"]()
     image_config = ctx["active_api_config"]("image")
@@ -96,25 +122,39 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
         form = aiohttp.FormData()
         form.add_field("model", image_model)
         form.add_field("prompt", full_prompt)
+        form.add_field("stream", "True")
+        form.add_field("partial_images", "0")
         for image in image_paths:
             form.add_field("image", image.open("rb"), filename=image.name, content_type="image/png" if image.suffix.lower() == ".png" else "image/jpeg")
         payload: Any = form
     else:
-        payload = {"model": image_model, "prompt": full_prompt}
+        payload = {"model": image_model, "prompt": full_prompt, "stream": True, "partial_images": 0}
 
-    ctx["log_json"]("Image request", {"url": request_url, "prompt": full_prompt, "images": [str(p) for p in image_paths], "headers": headers})
+    ctx["log_json"]("Image request", {"url": request_url, "prompt": full_prompt, "images": [str(p) for p in image_paths], "stream": True})
     async with aiohttp.ClientSession(headers=headers) as session:
         if image_paths:
             request = session.post(request_url, data=payload, timeout=60 * 30)
         else:
             request = session.post(request_url, json=payload, timeout=60 * 30)
         async with request as resp:
-            body = await resp.read()
-            body_text = body[:1000].decode("utf-8", errors="replace")
-            ctx["log"](f"Image response status={resp.status} content_type={resp.headers.get('content-type', '')} body_preview={body[:300]!r}")
-            if resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status}: {ctx['sanitize_error_detail'](body_text)}")
             content_type = resp.headers.get("content-type", "")
+            ctx["log"](f"Image response status={resp.status} content_type={content_type}")
+
+            if resp.status >= 400:
+                body = await resp.read()
+                body_text = body[:1000].decode("utf-8", errors="replace")
+                raise RuntimeError(f"HTTP {resp.status}: {ctx['sanitize_error_detail'](body_text)}")
+
+            if "event-stream" in content_type:
+                b64_json = await _parse_image_sse(resp, ctx)
+                if not b64_json:
+                    raise RuntimeError("流式响应未包含完整图片数据")
+                target = ctx["output_dir"] / f"{uuid.uuid4().hex}.png"
+                target.write_bytes(base64.b64decode(b64_json))
+                ctx["log"](f"Image saved from SSE stream: {target}")
+                return target
+
+            body = await resp.read()
             if content_type.startswith("image/"):
                 suffix = ".png" if "png" in content_type else ".jpg"
                 target = ctx["output_dir"] / f"{uuid.uuid4().hex}{suffix}"

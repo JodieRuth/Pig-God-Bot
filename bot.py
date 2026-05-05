@@ -715,30 +715,16 @@ async def reply_forward(event: dict[str, Any], lines: list[str]) -> None:
     non_empty = [line for line in lines if line]
     if not non_empty:
         return
-    node_lines: list[list[str]] = []
-    current: list[str] = []
-    for line in non_empty:
-        current.append(line)
-        if len(current) >= 12:
-            node_lines.append(current)
-            current = []
-    if current:
-        node_lines.append(current)
-    if len(node_lines) <= 1:
-        await reply(event, "\n".join(non_empty))
-        return
     bot_qq = os.getenv("BOT_QQ", "")
     bot_name = os.getenv("BOT_NAME", "") or "Bot"
-    messages: list[dict[str, Any]] = []
-    for chunk in node_lines:
-        messages.append({
-            "type": "node",
-            "data": {
-                "name": bot_name,
-                "uin": bot_qq,
-                "content": [{"type": "text", "data": {"text": "\n".join(chunk)}}],
-            },
-        })
+    messages: list[dict[str, Any]] = [{
+        "type": "node",
+        "data": {
+            "name": bot_name,
+            "uin": bot_qq,
+            "content": [{"type": "text", "data": {"text": "\n".join(non_empty)}}],
+        },
+    }]
     try:
         if event.get("message_type") == "group":
             await onebot_post("send_group_forward_msg", {"group_id": event["group_id"], "messages": messages})
