@@ -294,6 +294,8 @@ def result_preview(result: dict[str, Any]) -> str:
         for index, item in enumerate(candidates, start=1):
             lines.append(f"{index}. {item}")
         return "\n".join(lines)
+    if parsed is not None:
+        return "没有找到任何可能符合的角色。"
     body_summary = summarize_body(str(result.get("body_text") or ""))
     if body_summary:
         return body_summary
