@@ -27,6 +27,8 @@ def models_url_for_request(url: str) -> str:
     return value + "/models"
 
 
+
+
 async def check_http(url: str, headers: dict[str, str]) -> tuple[str, str]:
     if not url:
         return "SKIP", "未配置"

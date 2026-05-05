@@ -202,16 +202,19 @@ apply_env_active_state_to_runtime()
 
 
 def active_api_config(kind: str) -> dict[str, str]:
+    state = runtime_state.get(kind, {})
+    stored_url = state.get("url", "") if isinstance(state, dict) else ""
+    stored_key = state.get("key", "") if isinstance(state, dict) else ""
     configs = API_CONFIGS.get(kind, [])
     if not configs:
-        return {"index": "", "url": "", "key": ""}
-    selected = str(runtime_state.get(kind, {}).get("api_index", configs[0]["index"]))
+        return {"index": "", "url": stored_url, "key": stored_key}
+    selected = str(state.get("api_index", configs[0]["index"]) if isinstance(state, dict) else configs[0]["index"])
     for config in configs:
         if config["index"] == selected:
-            return config
+            return {"index": config["index"], "url": stored_url or config["url"], "key": stored_key or config["key"]}
     runtime_state.setdefault(kind, {})["api_index"] = configs[0]["index"]
     save_runtime_state(runtime_state)
-    return configs[0]
+    return {"index": configs[0]["index"], "url": stored_url or configs[0]["url"], "key": stored_key or configs[0]["key"]}
 
 
 def active_model(kind: str) -> str:
@@ -230,10 +233,17 @@ def set_active_api_by_model(kind: str, model: str) -> bool:
 
 def set_active_runtime(kind: str, api_index: str, model: str) -> bool:
     configs = API_CONFIGS.get(kind, [])
-    if not any(config["index"] == api_index for config in configs):
+    matched = None
+    for config in configs:
+        if config["index"] == api_index:
+            matched = config
+            break
+    if matched is None:
         return False
     runtime_state.setdefault(kind, {})["api_index"] = api_index
     runtime_state[kind]["model"] = model
+    runtime_state[kind]["url"] = matched["url"]
+    runtime_state[kind]["key"] = matched["key"]
     save_runtime_state(runtime_state)
     if kind == "llm":
         set_env_value("ACTIVE_LLM_API_INDEX", api_index)
