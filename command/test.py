@@ -289,7 +289,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
                 model_list.append(model)
         report(", ".join(model_list))
 
-    await ctx["reply"](event, "\n".join(results))
+    await ctx["reply_forward"](event, results)
 
 
 COMMAND = {
