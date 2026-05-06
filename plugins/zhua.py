@@ -2,7 +2,7 @@ import time
 from collections import defaultdict, deque
 from typing import Any
 
-TRIGGERS = {"zhua", "猪啊", "猪a", "dazhua", "大猪a"}
+TRIGGERS = {"zhua", "猪啊", "猪a", "dazhua", "大猪a", "zaoa", "早a", "🐷", "🐖", "🐽"}
 WINDOW_SECONDS = 120
 MAX_REPLIES = 3
 recent_replies: dict[str, deque[float]] = defaultdict(deque)
