@@ -1,7 +1,10 @@
 import asyncio
+import json
+import os
 import shutil
 import sys
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +12,7 @@ import aiohttp
 
 UPDATE_REPO = "https://github.com/JodieRuth/Pig-God-Bot"
 UPDATE_ZIP = f"{UPDATE_REPO}/archive/refs/heads/main.zip"
-PRESERVE_FILES = {".env", "runtime_state.json"}
+PRESERVE_FILES = {".env", "runtime_state.json", ".pending_update.json"}
 ALLOWED_JSON_FILES = {
     "command_nickname.json",
     "prompts.json",
@@ -19,6 +22,12 @@ ALLOWED_JSON_FILES = {
 C_SHARP_ROOT = "tools/browser_automation_host"
 C_SHARP_ALLOWED_SUFFIXES = {".cs", ".csproj"}
 ROOT_ALLOWED_FILES = {"requirements.txt"}
+ROLLBACK_DIR_NAME = "rollback"
+PENDING_UPDATE_FILE = ".pending_update.json"
+STARTUP_MAX_WAIT = 45
+
+ROLLBACK_SKIP_ITEMS = {".env", "runtime_state.json", ROLLBACK_DIR_NAME, PENDING_UPDATE_FILE,
+                       "cache", "outputs", "logs", "__pycache__", ".git"}
 
 
 async def _download(url: str, target: Path) -> str:
@@ -65,7 +74,6 @@ def _is_allowed_update_file(rel: Path) -> bool:
     if rel_posix in ROOT_ALLOWED_FILES:
         return True
     return False
-
 
 
 def _copy_files(src: Path, dest: Path, errors: list[str]) -> None:
@@ -119,6 +127,65 @@ def _install_requirements(root: Path) -> str:
         return f"{type(exc).__name__}: {exc}"
 
 
+def _backup_to_rollback(bot_root: Path) -> str:
+    rollback_root = bot_root / ROLLBACK_DIR_NAME
+    rollback_root.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+    target = rollback_root / timestamp
+    target.mkdir(parents=True, exist_ok=True)
+
+    errors: list[str] = []
+    for item in bot_root.iterdir():
+        if item.name in ROLLBACK_SKIP_ITEMS:
+            continue
+        if item.name.startswith("_update"):
+            continue
+        try:
+            if item.is_dir():
+                shutil.copytree(item, target / item.name,
+                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                                dirs_exist_ok=True)
+            else:
+                target_item = target / item.name
+                target_item.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target_item)
+        except Exception as exc:
+            errors.append(f"{item.name}: {exc}")
+
+    if errors:
+        return f"ERR:{'; '.join(errors[:3])}"
+    return timestamp
+
+
+def _restore_from_rollback(bot_root: Path, timestamp: str) -> str:
+    source = bot_root / ROLLBACK_DIR_NAME / timestamp
+    if not source.exists():
+        return f"回滚点 {timestamp} 不存在"
+
+    errors: list[str] = []
+    for item in source.iterdir():
+        if item.name in ROLLBACK_SKIP_ITEMS or item.name.startswith("_update"):
+            continue
+        target = bot_root / item.name
+        try:
+            if item.is_dir():
+                if target.exists():
+                    shutil.rmtree(target)
+                shutil.copytree(item, target)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+        except Exception as exc:
+            errors.append(f"{item.name}: {exc}")
+
+    _clean_pycache(bot_root)
+
+    if errors:
+        return f"回滚部分失败: {'; '.join(errors[:3])}"
+    return ""
+
+
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if not ctx["is_admin_event"](event):
         await ctx["reply"](event, "你没有权限使用更新指令。")
@@ -127,26 +194,34 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     await ctx["reply"](event, "正在从 GitHub 下载更新，完成后将自动重启。")
 
     bot_root = Path(__file__).resolve().parent.parent
+
+    await ctx["reply"](event, "正在备份当前 bot 全部代码到 rollback 文件夹...")
+    backup_result = _backup_to_rollback(bot_root)
+    if backup_result.startswith("ERR:"):
+        await ctx["reply"](event, f"备份失败：{backup_result[4:]}")
+        return
+    rollback_timestamp = backup_result
+
     zip_path = bot_root / "_update.zip"
     tmp_dir = bot_root / "_update_tmp"
 
     error = await _download(UPDATE_ZIP, zip_path)
     if error:
         zip_path.unlink(missing_ok=True)
-        await ctx["reply"](event, f"下载失败：{error}")
+        await ctx["reply"](event, f"下载失败：{error}，已备份到 rollback/{rollback_timestamp}")
         return
 
     error = _extract(zip_path, tmp_dir)
     zip_path.unlink(missing_ok=True)
     if error:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        await ctx["reply"](event, f"解压失败：{error}")
+        await ctx["reply"](event, f"解压失败：{error}，已备份到 rollback/{rollback_timestamp}")
         return
 
     src = _find_source_root(tmp_dir)
     if src is None:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        await ctx["reply"](event, "更新文件结构异常，未找到源码目录。")
+        await ctx["reply"](event, f"更新文件结构异常，未找到源码目录。已备份到 rollback/{rollback_timestamp}")
         return
 
     copy_errors: list[str] = []
@@ -158,16 +233,63 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
     pip_error = _install_requirements(bot_root)
 
-    if copy_errors:
-        detail = "；".join(copy_errors[:3])
-        suffix = f"，但有 {len(copy_errors)} 个文件覆盖失败：{detail}" if len(copy_errors) <= 3 else f"，但 {len(copy_errors)} 个文件覆盖失败（部分：{detail}）"
-    elif pip_error:
-        suffix = f"，但 pip install 失败：{pip_error}"
-    else:
-        suffix = ""
+    pending = {
+        "rollback_timestamp": rollback_timestamp,
+        "event": {
+            "message_type": event.get("message_type"),
+            "group_id": event.get("group_id"),
+            "user_id": event.get("user_id"),
+            "message_id": event.get("message_id"),
+        },
+    }
+    pending_file = bot_root / PENDING_UPDATE_FILE
+    pending_file.write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
 
-    ctx["bot_state"]["stopped"] = False
-    await ctx["reply"](event, f"更新完成{suffix}，正在重启 bot 进程。")
+    ctx["bot_state"]["stopped"] = True
+    await ctx["reply"](event, "更新文件已就绪，正在启动新版本 bot...")
+    await asyncio.sleep(0.5)
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(bot_root / "bot.py"),
+    )
+
+    startup_ok = False
+    for _ in range(STARTUP_MAX_WAIT):
+        if not pending_file.exists():
+            startup_ok = True
+            break
+        if proc.returncode is not None:
+            break
+        await asyncio.sleep(1)
+
+    if startup_ok:
+        suffix = ""
+        if copy_errors:
+            detail = "；".join(copy_errors[:3])
+            suffix = f"，但有 {len(copy_errors)} 个文件覆盖失败：{detail}" if len(copy_errors) <= 3 else f"，但 {len(copy_errors)} 个文件覆盖失败（部分：{detail}）"
+        elif pip_error:
+            suffix = f"，但 pip install 失败：{pip_error}"
+        await ctx["reply"](event, f"更新完成{suffix}，bot 已重新上线。")
+        os._exit(0)
+
+    if proc.returncode is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    restore_error = _restore_from_rollback(bot_root, rollback_timestamp)
+    pending_file.unlink(missing_ok=True)
+
+    fail_msg = "更新失败，bot 启动崩溃。"
+    if proc.returncode is not None:
+        fail_msg += f"\n进程退出码: {proc.returncode}"
+    if restore_error:
+        fail_msg += f"\n回滚时出现问题：{restore_error}"
+    else:
+        fail_msg += "\n已自动回滚到更新前的版本，正在重启旧版 bot..."
+
+    await ctx["reply"](event, fail_msg)
     await asyncio.sleep(0.5)
     ctx["reboot_process"]()
 
@@ -175,6 +297,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 COMMAND = {
     "name": "/update",
     "usage": "/update",
-    "description": "仅所有者可用：从 GitHub 拉取最新源码更新并重启。",
+    "description": "仅所有者可用：从 GitHub 拉取最新源码更新并重启。更新前自动备份到 rollback，启动失败自动回滚。",
     "handler": handler,
 }

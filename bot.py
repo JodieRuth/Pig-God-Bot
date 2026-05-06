@@ -1394,24 +1394,37 @@ def command_context() -> dict[str, Any]:
 
 
 
-def load_command_module(path: Path) -> dict[str, Any] | None:
+def load_command_module(path: Path) -> list[dict[str, Any]]:
     module_name = f"local_onebot_command_{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if not spec or not spec.loader:
         log(f"Command skipped: {path.name} cannot create module spec")
-        return None
+        return []
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    command = getattr(module, "COMMAND", None)
-    if not isinstance(command, dict):
-        log(f"Command skipped: {path.name} missing COMMAND dict")
-        return None
-    name = str(command.get("name") or "").strip().lower()
-    handler = command.get("handler")
-    if not name.startswith("/") or not callable(handler):
-        log(f"Command skipped: {path.name} invalid name or handler")
-        return None
-    return command
+    get_commands = getattr(module, "get_commands", None)
+    if callable(get_commands):
+        raw_commands = get_commands()
+    else:
+        commands = getattr(module, "COMMANDS", None)
+        if isinstance(commands, list):
+            raw_commands = commands
+        else:
+            command = getattr(module, "COMMAND", None)
+            raw_commands = [command] if isinstance(command, dict) else []
+    result: list[dict[str, Any]] = []
+    for command in raw_commands:
+        if not isinstance(command, dict):
+            continue
+        name = str(command.get("name") or "").strip().lower()
+        handler = command.get("handler")
+        if not name.startswith("/") or not callable(handler):
+            log(f"Command skipped: {path.name} invalid name or handler for {name!r}")
+            continue
+        result.append(command)
+    if not result:
+        log(f"Command skipped: {path.name} missing valid COMMAND/COMMANDS/get_commands")
+    return result
 
 
 def load_command_nicknames() -> dict[str, list[str]]:
@@ -1458,28 +1471,27 @@ def load_commands() -> tuple[dict[str, str], dict[str, Any], dict[str, list[str]
         if path.name.startswith("_"):
             continue
         try:
-            command = load_command_module(path)
+            loaded_commands = load_command_module(path)
         except Exception as exc:
             log(f"Command load failed: {path.name} error={exc}")
             continue
-        if not command:
-            continue
-        name = str(command["name"]).strip().lower()
-        usage = str(command.get("usage") or name).strip()
-        description = str(command.get("description") or "无说明").strip()
-        if name not in command_aliases:
-            command_aliases[name] = []
-            changed_aliases = True
-        handlers[name] = command["handler"]
-        aliases = [alias for alias in command_aliases.get(name, []) if not alias.startswith("/") or alias not in handlers]
-        for alias in aliases:
-            if alias.startswith("/"):
-                handlers[alias] = command["handler"]
-        if aliases:
-            help_items[f"{usage}（别名：{', '.join(aliases)}）"] = description
-        else:
-            help_items[usage] = description
-        log(f"Command loaded: {name} from {path.name} aliases={aliases}")
+        for command in loaded_commands:
+            name = str(command["name"]).strip().lower()
+            usage = str(command.get("usage") or name).strip()
+            description = str(command.get("description") or "无说明").strip()
+            if name not in command_aliases:
+                command_aliases[name] = []
+                changed_aliases = True
+            handlers[name] = command["handler"]
+            aliases = [alias for alias in command_aliases.get(name, []) if not alias.startswith("/") or alias not in handlers]
+            for alias in aliases:
+                if alias.startswith("/"):
+                    handlers[alias] = command["handler"]
+            if aliases:
+                help_items[f"{usage}（别名：{', '.join(aliases)}）"] = description
+            else:
+                help_items[usage] = description
+            log(f"Command loaded: {name} from {path.name} aliases={aliases}")
     if changed_aliases or not COMMAND_NICKNAME_FILE.exists():
         save_command_nicknames(command_aliases)
     return help_items, handlers, command_aliases
@@ -1917,7 +1929,45 @@ async def connect_onebot_ws(headers: dict[str, str]):
         return await websockets.connect(ONEBOT_WS, extra_headers=headers)
 
 
+async def _handle_pending_update() -> None:
+    pending_file = ROOT / ".pending_update.json"
+    if not pending_file.exists():
+        return
+    try:
+        data = json.loads(pending_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pending_file.unlink(missing_ok=True)
+        return
+    event = data.get("event", {})
+    message_type = event.get("message_type")
+    user_id = event.get("user_id")
+    group_id = event.get("group_id")
+    load_dotenv(ENV_FILE, override=True)
+    token = os.getenv("ONEBOT_TOKEN", "local_onebot_token")
+    http_url = os.getenv("ONEBOT_HTTP", "http://127.0.0.1:3000").rstrip("/")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    message = [{"type": "text", "data": {"text": "更新完成，bot 已重新上线。"}}]
+    if message_type == "group" and group_id:
+        url = f"{http_url}/send_group_msg"
+        payload = {"group_id": group_id, "message": message}
+    else:
+        url = f"{http_url}/send_private_msg"
+        payload = {"user_id": user_id, "message": message}
+    console_log("Sending pending update notification...")
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.post(url, json=payload, timeout=30) as resp:
+                if resp.status >= 400:
+                    console_log(f"Pending update notification failed: HTTP {resp.status}")
+                else:
+                    console_log("Pending update notification sent successfully")
+    except Exception as exc:
+        console_log(f"Pending update notification error: {exc}")
+    pending_file.unlink(missing_ok=True)
+
+
 async def main() -> None:
+    await _handle_pending_update()
     log(f"Connecting to {ONEBOT_WS}")
     while True:
         try:

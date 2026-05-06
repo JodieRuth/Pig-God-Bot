@@ -38,3 +38,5 @@ cache/
 /*.png
 _update.zip
 _update_tmp/
+rollback/
+.pending_update.json
