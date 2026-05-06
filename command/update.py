@@ -97,19 +97,26 @@ def _clean_pycache(root: Path) -> None:
             pass
 
 
-def _install_requirements(root: Path) -> None:
+def _install_requirements(root: Path) -> str:
     req = root / "requirements.txt"
     if not req.exists():
-        return
+        return ""
     try:
         import subprocess
-        subprocess.run(
+
+        result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-r", str(req)],
-            capture_output=True,
-            timeout=120,
+            capture_output=False,
+            timeout=300,
+            cwd=str(root),
         )
-    except Exception:
-        pass
+        if result.returncode != 0:
+            return f"pip install 返回 exit code {result.returncode}"
+        return ""
+    except subprocess.TimeoutExpired:
+        return "pip install 超时"
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
 
 
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
@@ -149,11 +156,13 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    _install_requirements(bot_root)
+    pip_error = _install_requirements(bot_root)
 
     if copy_errors:
         detail = "；".join(copy_errors[:3])
         suffix = f"，但有 {len(copy_errors)} 个文件覆盖失败：{detail}" if len(copy_errors) <= 3 else f"，但 {len(copy_errors)} 个文件覆盖失败（部分：{detail}）"
+    elif pip_error:
+        suffix = f"，但 pip install 失败：{pip_error}"
     else:
         suffix = ""
 
