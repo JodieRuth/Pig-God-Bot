@@ -95,7 +95,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             suffix = f"可用编号：{', '.join(available)}" if available else "当前没有可用 prompt 配置。"
             await ctx["reply"](event, f"没有找到 prompt #{value}。{suffix}")
             return
-        ctx["set_active_prompt"](value)
+        ctx["set_active_prompt"](value, ctx["scope_key"](event))
         name = prompt_configs.get(value, {}).get("name") or value
         await ctx["reply"](event, f"已切换 prompt：#{value} {name}。")
         return

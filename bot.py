@@ -269,7 +269,32 @@ def load_prompt_configs() -> dict[str, dict[str, Any]]:
     return result
 
 
+def save_prompt_configs() -> None:
+    global _prompts_mtime
+    tmp = PROMPTS_FILE.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(PROMPT_CONFIGS, f, ensure_ascii=False, indent=2)
+    tmp.replace(PROMPTS_FILE)
+    _prompts_mtime = PROMPTS_FILE.stat().st_mtime if PROMPTS_FILE.exists() else 0.0
+
+
+def build_scope_active_prompt() -> None:
+    global scope_active_prompt
+    new_scope: dict[str, str] = {}
+    for prompt_id, config in PROMPT_CONFIGS.items():
+        groups = config.get("active_groups")
+        users = config.get("active_users")
+        if isinstance(groups, list):
+            for gid in groups:
+                new_scope[f"group:{gid}"] = prompt_id
+        if isinstance(users, list):
+            for uid in users:
+                new_scope[f"private:{uid}"] = prompt_id
+    scope_active_prompt = new_scope
+
+
 PROMPT_CONFIGS = load_prompt_configs()
+build_scope_active_prompt()
 
 
 def reload_env_config(force: bool = False) -> bool:
@@ -303,6 +328,7 @@ def reload_prompt_configs(force: bool = False) -> bool:
         return False
     PROMPT_CONFIGS = load_prompt_configs()
     _prompts_mtime = current_mtime
+    build_scope_active_prompt()
     active_prompt_id()
     return True
 
@@ -316,7 +342,11 @@ def reload_runtime_files(force: bool = False) -> None:
         log("Reloaded prompts.json runtime config")
 
 
-def active_prompt_id() -> str:
+scope_active_prompt: dict[str, str] = {}
+
+def active_prompt_id(scope_key: str = "") -> str:
+    if scope_key and scope_key in scope_active_prompt and scope_active_prompt[scope_key] in PROMPT_CONFIGS:
+        return scope_active_prompt[scope_key]
     prompt_state = runtime_state.get("prompt", {})
     prompt_id = str(prompt_state.get("id") or "1") if isinstance(prompt_state, dict) else "1"
     if prompt_id in PROMPT_CONFIGS:
@@ -328,17 +358,31 @@ def active_prompt_id() -> str:
     return ""
 
 
-def active_prompt_config() -> dict[str, Any]:
-    prompt_id = active_prompt_id()
+def active_prompt_config(scope_key: str = "") -> dict[str, Any]:
+    prompt_id = active_prompt_id(scope_key)
     return PROMPT_CONFIGS.get(prompt_id, {})
 
 
-def set_active_prompt(prompt_id: str) -> bool:
+def set_active_prompt(prompt_id: str, scope_key: str = "") -> bool:
     if prompt_id not in PROMPT_CONFIGS:
         return False
-    runtime_state.setdefault("prompt", {})["id"] = prompt_id
-    save_runtime_state(runtime_state)
-    set_env_value("ACTIVE_PROMPT_ID", prompt_id)
+    if scope_key:
+        scope_part, _, raw_id = scope_key.partition(":")
+        tracking_key = "active_groups" if scope_part == "group" else "active_users"
+        for pid, config in PROMPT_CONFIGS.items():
+            arr = config.get(tracking_key)
+            if isinstance(arr, list) and raw_id in arr:
+                arr.remove(raw_id)
+        target_config = PROMPT_CONFIGS[prompt_id]
+        target_config.setdefault(tracking_key, [])
+        if raw_id not in target_config[tracking_key]:
+            target_config[tracking_key].append(raw_id)
+        save_prompt_configs()
+        scope_active_prompt[scope_key] = prompt_id
+    else:
+        runtime_state.setdefault("prompt", {})["id"] = prompt_id
+        save_runtime_state(runtime_state)
+        set_env_value("ACTIVE_PROMPT_ID", prompt_id)
     return True
 
 
@@ -365,41 +409,9 @@ MAX_CONTEXT_IMAGES = 10
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 DEBUG_LOG = os.getenv("DEBUG_LOG", "1") != "0"
 
-def prompt_value(key: str) -> str:
-    value = active_prompt_config().get(key, "")
+def prompt_value(key: str, scope_key: str = "") -> str:
+    value = active_prompt_config(scope_key).get(key, "")
     return str(value) if value else ""
-
-
-def image_generation_tool(description: str, is_admin: bool) -> dict[str, Any]:
-    prompt_description = "给图像生成模型的完整中文提示词。必须保留管理员对图1、图2、第一张、第二张等输入图片编号的引用和具体编辑目标，不要自行交换图片顺序，不要删减关键要求。" if is_admin else "给图像生成模型的完整中文提示词。必须保留用户对图1、图2等图片编号的引用和编辑目标。提示词不得包含政治敏感、中国大陆政治不正确、违法违规、色情低俗、隐私侵犯、攻击骚扰等不允许内容。"
-    image_indexes_description = "要传给生图工具的图片编号列表，例如 [1,2]。编号来自输入图片顺序：图1 是第一张输入图片，图2 是第二张。管理员明确提到哪些图就传哪些图；若本次是纯文生图或没有明确引用图片，就不要填写任何图片编号。" if is_admin else "要传给生图工具的图片编号列表，例如 [1,2]。编号来自输入图片顺序：图1 是第一张输入图片，图2 是第二张。若本次是纯文生图，就不要填写任何图片编号。"
-    notice_description = "发给 QQ 管理员的简短开始提示，例如：收到，开始处理这张图，完成后会带用时回复。" if is_admin else "发给 QQ 用户的简短开始提示，例如：已开始处理这张图，完成后会带用时回复。"
-    return {
-        "type": "function",
-        "function": {
-            "name": "generate_image",
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": prompt_description,
-                    },
-                    "image_indexes": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": image_indexes_description,
-                    },
-                    "notice": {
-                        "type": "string",
-                        "description": notice_description,
-                    },
-                },
-                "required": ["prompt"],
-            },
-        },
-    }
 
 
 contexts: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=MAX_CONTEXT_MESSAGES))
@@ -1086,11 +1098,11 @@ def format_admin_users() -> str:
     return ", ".join(str(user_id) for user_id in sorted(ADMIN_USERS)) or "无"
 
 
-def select_system_prompt(user_id: int) -> str:
+def select_system_prompt(user_id: int, scope_key: str) -> str:
     reload_runtime_files()
     if is_admin_user(user_id):
-        return prompt_value("admin_system_prompt").format(admin_users=format_admin_users())
-    return prompt_value("system_prompt")
+        return prompt_value("admin_system_prompt", scope_key).format(admin_users=format_admin_users())
+    return prompt_value("system_prompt", scope_key)
 
 
 def select_tools(user_id: int) -> list[dict[str, Any]]:
@@ -1376,6 +1388,7 @@ def command_context() -> dict[str, Any]:
         "clear_contexts": contexts.clear,
         "clear_current_context": clear_current_context,
         "reboot_process": reboot_process,
+        "scope_key": scope_key,
         "reload_runtime_files": reload_runtime_files,
         "tool_infos": [item.copy() for item in TOOL_INFOS],
         "tool_definitions": [tool.copy() for tool in TOOL_DEFINITIONS],
@@ -1514,9 +1527,7 @@ COMMAND_HELP, COMMAND_HANDLERS, COMMAND_ALIASES = load_commands()
 
 
 def tool_definition_context() -> dict[str, Any]:
-    return {
-        "prompt_value": prompt_value,
-    }
+    return {}
 
 
 def load_tool_module(path: Path) -> dict[str, Any] | None:
@@ -1912,7 +1923,7 @@ async def handle_event(event: dict[str, Any]) -> None:
             log("No prompt after normalization")
             return
         images = select_llm_images(key, int(event.get("user_id", 0)), current_images) if allow_photos else []
-        system_prompt = select_system_prompt(int(event.get("user_id", 0)))
+        system_prompt = select_system_prompt(int(event.get("user_id", 0)), key)
         tools = select_tools(int(event.get("user_id", 0)))
         log(f"Context resolved: texts={len(context_texts)} recent_images={len(recent_images)} current_images={len(current_images)} selected_images={len(images)} selected_image_files={[image_path(record).name for record in images]} admin={is_admin_user(int(event.get('user_id', 0)))}")
         log("Calling LLM now")

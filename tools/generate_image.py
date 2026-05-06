@@ -6,13 +6,15 @@ from pathlib import Path
 from typing import Any
 
 
+TOOL_DESCRIPTION = "启动一个后台图像生成或图像编辑任务。仅用于合规的图片生成、参考图改图、替换主体、改变风格、图文生图、图像合成等请求。若请求或上下文涉及政治敏感、中国大陆政治不正确、违法违规、暴力恐怖、色情低俗、赌博诈骗、侵犯隐私、规避平台审核、攻击骚扰、仇恨歧视、自伤自杀诱导、未成年人不当内容、伪造证件票据、冒充真实个人或任何 QQ 平台和中国大陆法规不允许的内容，禁止调用此工具，必须直接拒绝。"
+
+
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
-    description = ctx["prompt_value"]("tool_description") or "当用户明确要求生成、编辑、重绘、修图、扩图或进行其他允许的图片生成任务时调用。"
     return {
         "type": "function",
         "function": {
             "name": "generate_image",
-            "description": description,
+            "description": TOOL_DESCRIPTION,
             "parameters": {
                 "type": "object",
                 "properties": {
