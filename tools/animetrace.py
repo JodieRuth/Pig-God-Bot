@@ -214,6 +214,20 @@ def short_line(value: Any, limit: int = 80) -> str:
     return text[:limit]
 
 
+def format_candidate(item: dict[str, Any]) -> str | None:
+    work = item.get("work") or item.get("anime") or item.get("title") or item.get("name")
+    character = item.get("character") or item.get("person") or item.get("role") or item.get("nickname")
+    similarity = item.get("similarity") or item.get("score") or item.get("prob") or item.get("confidence")
+    if isinstance(work, (list, dict)) or isinstance(character, (list, dict)):
+        return None
+    if not work and not character:
+        return None
+    parts = [f"作品：{short_line(work, 40) if work else '未知'}", f"角色：{short_line(character, 40) if character else '未知'}"]
+    if similarity is not None:
+        parts.append(f"相似度 {short_line(similarity, 24)}")
+    return " ".join(parts)
+
+
 def collect_candidates(value: Any, limit: int = 5) -> list[str]:
     candidates: list[str] = []
 
@@ -221,16 +235,10 @@ def collect_candidates(value: Any, limit: int = 5) -> list[str]:
         if len(candidates) >= limit:
             return
         if isinstance(item, dict):
-            title = item.get("title") or item.get("name") or item.get("character") or item.get("anime") or item.get("work")
-            episode = item.get("episode") or item.get("episodeTitle") or item.get("from") or item.get("source")
-            similarity = item.get("similarity") or item.get("score") or item.get("prob") or item.get("confidence")
-            parts = [short_line(title), short_line(episode)]
-            if similarity is not None:
-                parts.append(f"相似度 {short_line(similarity, 24)}")
-            line = " / ".join(part for part in parts if part)
+            line = format_candidate(item)
             if line and line not in candidates:
                 candidates.append(line)
-            for key in ("data", "result", "results", "docs", "list", "items"):
+            for key in ("data", "result", "results", "docs", "list", "items", "character", "characters"):
                 if key in item:
                     walk(item[key])
         elif isinstance(item, list):
