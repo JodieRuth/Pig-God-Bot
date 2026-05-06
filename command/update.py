@@ -10,6 +10,12 @@ import aiohttp
 UPDATE_REPO = "https://github.com/JodieRuth/Pig-God-Bot"
 UPDATE_ZIP = f"{UPDATE_REPO}/archive/refs/heads/main.zip"
 PRESERVE_FILES = {".env", "runtime_state.json"}
+ALLOWED_JSON_FILES = {
+    "command_nickname.json",
+    "prompts.json",
+    "command/haochi/drinks.json",
+    "command/haochi/foods.json",
+}
 
 
 async def _download(url: str, target: Path) -> str:
@@ -51,6 +57,14 @@ def _copy_files(src: Path, dest: Path, errors: list[str]) -> None:
         if any(part.startswith(".") and part not in (".env", ".env.example", ".gitignore") for part in rel.parts):
             continue
         name = rel.name
+        rel_posix = rel.as_posix()
+        if item.is_file():
+            if item.suffix.lower() == ".py":
+                pass
+            elif item.suffix.lower() == ".json" and rel_posix in ALLOWED_JSON_FILES:
+                pass
+            else:
+                continue
         if name in PRESERVE_FILES:
             continue
         target = dest / rel
