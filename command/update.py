@@ -12,6 +12,11 @@ import aiohttp
 
 UPDATE_REPO = "https://github.com/JodieRuth/Pig-God-Bot"
 UPDATE_ZIP = f"{UPDATE_REPO}/archive/refs/heads/main.zip"
+UPDATE_MIRROR_PREFIXES = [
+    "https://gh.llkk.cc/",
+    "https://ghproxy.net/",
+    "https://gh-proxy.com/",
+]
 PRESERVE_FILES = {".env", "runtime_state.json", ".pending_update.json"}
 ALLOWED_JSON_FILES = {
     "command_nickname.json",
@@ -30,18 +35,52 @@ ROLLBACK_SKIP_ITEMS = {".env", "runtime_state.json", ROLLBACK_DIR_NAME, PENDING_
                        "cache", "outputs", "logs", "__pycache__", ".git"}
 
 
-async def _download(url: str, target: Path) -> str:
+def _short_error(error: str, limit: int = 300) -> str:
+    text = " ".join(str(error).split())
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _download_plan() -> list[tuple[str, str, bool]]:
+    plan = [("GitHub 直连", UPDATE_ZIP, False), ("GitHub 系统代理", UPDATE_ZIP, True)]
+    for prefix in UPDATE_MIRROR_PREFIXES:
+        plan.append((f"镜像 {prefix.rstrip('/')}", prefix + UPDATE_ZIP, False))
+        plan.append((f"镜像 {prefix.rstrip('/')} 系统代理", prefix + UPDATE_ZIP, True))
+    return plan
+
+
+async def _download(url: str, target: Path, trust_env: bool = False) -> str:
     try:
-        timeout = aiohttp.ClientTimeout(total=120)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
+        timeout = aiohttp.ClientTimeout(total=120, connect=30, sock_connect=30, sock_read=90)
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=trust_env) as session:
+            async with session.get(url, allow_redirects=True) as resp:
                 if resp.status >= 400:
                     return f"HTTP {resp.status}"
                 data = await resp.read()
+                if not data:
+                    return "下载内容为空"
                 target.write_bytes(data)
                 return ""
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
+
+
+async def _download_with_fallback(target: Path) -> tuple[str, list[str]]:
+    failures: list[str] = []
+    for name, url, trust_env in _download_plan():
+        target.unlink(missing_ok=True)
+        error = await _download(url, target, trust_env=trust_env)
+        if not error and target.exists() and target.stat().st_size > 0:
+            return name, failures
+        failures.append(f"{name}: {_short_error(error or '下载文件不存在或为空')}")
+    target.unlink(missing_ok=True)
+    return "", failures
+
+
+def _format_download_failures(failures: list[str]) -> str:
+    lines = ["下载失败，所有下载方式均不可用："]
+    for index, failure in enumerate(failures, start=1):
+        lines.append(f"{index}. {failure}")
+    return "\n".join(lines)
 
 
 def _extract(zip_path: Path, dest: Path) -> str:
@@ -205,11 +244,15 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     zip_path = bot_root / "_update.zip"
     tmp_dir = bot_root / "_update_tmp"
 
-    error = await _download(UPDATE_ZIP, zip_path)
-    if error:
+    source_name, download_failures = await _download_with_fallback(zip_path)
+    if not source_name:
         zip_path.unlink(missing_ok=True)
-        await ctx["reply"](event, f"下载失败：{error}，已备份到 rollback/{rollback_timestamp}")
+        await ctx["reply_forward"](event, [
+            _format_download_failures(download_failures),
+            f"已备份到 rollback/{rollback_timestamp}",
+        ])
         return
+    await ctx["reply"](event, f"下载成功，来源：{source_name}，正在解压更新包。")
 
     error = _extract(zip_path, tmp_dir)
     zip_path.unlink(missing_ok=True)
