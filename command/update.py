@@ -16,6 +16,9 @@ ALLOWED_JSON_FILES = {
     "command/haochi/drinks.json",
     "command/haochi/foods.json",
 }
+C_SHARP_ROOT = "tools/browser_automation_host"
+C_SHARP_ALLOWED_SUFFIXES = {".cs", ".csproj"}
+ROOT_ALLOWED_FILES = {"requirements.txt"}
 
 
 async def _download(url: str, target: Path) -> str:
@@ -51,20 +54,28 @@ def _find_source_root(extract_dir: Path) -> Path | None:
     return None
 
 
+def _is_allowed_update_file(rel: Path) -> bool:
+    rel_posix = rel.as_posix()
+    if rel.suffix.lower() == ".py":
+        return True
+    if rel.suffix.lower() == ".json" and rel_posix in ALLOWED_JSON_FILES:
+        return True
+    if rel_posix.startswith(C_SHARP_ROOT + "/") and rel.suffix.lower() in C_SHARP_ALLOWED_SUFFIXES:
+        return True
+    if rel_posix in ROOT_ALLOWED_FILES:
+        return True
+    return False
+
+
+
 def _copy_files(src: Path, dest: Path, errors: list[str]) -> None:
     for item in src.rglob("*"):
         rel = item.relative_to(src)
         if any(part.startswith(".") and part not in (".env", ".env.example", ".gitignore") for part in rel.parts):
             continue
         name = rel.name
-        rel_posix = rel.as_posix()
-        if item.is_file():
-            if item.suffix.lower() == ".py":
-                pass
-            elif item.suffix.lower() == ".json" and rel_posix in ALLOWED_JSON_FILES:
-                pass
-            else:
-                continue
+        if item.is_file() and not _is_allowed_update_file(rel):
+            continue
         if name in PRESERVE_FILES:
             continue
         target = dest / rel

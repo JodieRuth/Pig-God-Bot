@@ -17,6 +17,10 @@ logs/
 runtime_state.json
 outputs/
 command/quote/img/
+command/quote/data.json
+command/zhubi/data.json
+command/mcserver/data.json
+plugins/*.json
 bin/
 obj/
 *.user
@@ -30,3 +34,7 @@ obj/
 Thumbs.db
 desktop.ini
 cache/
+/*.jpg
+/*.png
+_update.zip
+_update_tmp/
