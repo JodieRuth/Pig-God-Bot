@@ -735,6 +735,17 @@ async def reply_forward(event: dict[str, Any], lines: list[str]) -> None:
         await reply(event, "\n".join(non_empty))
 
 
+def qq_avatar_url(qq: int | str, size: int = 640) -> str:
+    user_id = str(qq).strip()
+    return f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s={int(size)}"
+
+
+async def download_qq_avatar(qq: int | str, size: int = 640) -> Path | None:
+    url = qq_avatar_url(qq, size)
+    async with aiohttp.ClientSession(headers=auth_headers()) as session:
+        return await download_image(session, url)
+
+
 async def download_image(session: aiohttp.ClientSession, url: str) -> Path | None:
     log(f"Image received for download: {url[:200]}")
     if url.startswith("file://"):
@@ -1374,6 +1385,8 @@ def command_context() -> dict[str, Any]:
         "image_path": image_path,
         "image_sender_label": image_sender_label,
         "download_image": download_image,
+        "qq_avatar_url": qq_avatar_url,
+        "download_qq_avatar": download_qq_avatar,
         "sanitize_error_detail": sanitize_error_detail,
         "exception_detail": exception_detail,
         "log_json": log_json,
