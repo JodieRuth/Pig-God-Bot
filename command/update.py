@@ -306,13 +306,11 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         await asyncio.sleep(1)
 
     if startup_ok:
-        suffix = ""
         if copy_errors:
             detail = "；".join(copy_errors[:3])
-            suffix = f"，但有 {len(copy_errors)} 个文件覆盖失败：{detail}" if len(copy_errors) <= 3 else f"，但 {len(copy_errors)} 个文件覆盖失败（部分：{detail}）"
-        elif pip_error:
-            suffix = f"，但 pip install 失败：{pip_error}"
-        await ctx["reply"](event, f"更新完成{suffix}，bot 已重新上线。")
+            log(f"Update finished with copy warnings: {detail}")
+        if pip_error:
+            log(f"Update finished with pip warning: {pip_error}")
         os._exit(0)
 
     if proc.returncode is not None:
