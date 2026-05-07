@@ -63,6 +63,15 @@ def user_has_pending(store: dict[str, Any], user_id: str) -> bool:
     return False
 
 
+def target_is_busy(store: dict[str, Any], user_id: str) -> bool:
+    for value in store.values():
+        if not isinstance(value, dict):
+            continue
+        if str(value.get("to")) == user_id:
+            return True
+    return False
+
+
 def challenge_key(group_id: int, user_a: str, user_b: str) -> str:
     first, second = sorted([user_a, user_b])
     return f"{group_id}:{first}:{second}"
@@ -198,7 +207,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         zhubi.save_data(data)
         await ctx["reply"](event, "你当前已经在一个 PVP 挑战中，需等待应战、结算或 15 分钟超时后才能再次发起。")
         return
-    if not is_admin and user_has_pending(store, target_id):
+    if not is_admin and target_is_busy(store, target_id):
         zhubi.save_data(data)
         await ctx["reply"](event, f"{target_name} 当前已经在一个 PVP 挑战中，暂时不能被挑战。")
         return
