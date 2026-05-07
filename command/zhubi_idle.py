@@ -115,18 +115,24 @@ async def handle_buy(event: dict[str, Any], parts: list[str], ctx: dict[str, Any
     state = common.idle_state(user)
     level = int(state.get(kind, 0))
     cost = common.upgrade_cost(kind, level)
-    balance = common.balance_of(user)
-    if balance < cost:
+    holding = common.total_holding(user)
+    if holding < cost:
         zhubi.save_data(data)
-        await ctx["reply"](event, f"猪币不足。升级 {kind} 需要 {common.format_amount(cost)}，你当前持有 {common.format_amount(balance)}。")
+        await ctx["reply"](event, f"猪币不足。升级 {kind} 需要 {common.format_amount(cost)}，你当前持有 {common.format_amount(holding)}。")
         return
-    common.change_balance(user, -cost)
+    spent = common.spend_amount(user, float(cost))
+    if spent is None:
+        zhubi.save_data(data)
+        await ctx["reply"](event, f"猪币不足。升级 {kind} 需要 {common.format_amount(cost)}，你当前持有 {common.format_amount(common.total_holding(user))}。")
+        return
+    main_spent, idle_spent = spent
     state[kind] = level + 1
     if event.get("message_type") == "group":
         state["group_id"] = int(event.get("group_id", 0))
     zhubi.save_data(data)
     await notify_milestones(event, ctx, notifications)
-    await ctx["reply"](event, f"已购买 {kind} 升级，消耗 {common.format_amount(cost)}。当前等级：{common.level_label(int(state[kind]))}。")
+    idle_text = f"，从 idle 抵扣了 {common.format_amount(idle_spent)}" if idle_spent > 0 else ""
+    await ctx["reply"](event, f"已购买 {kind} 升级，消耗 {common.format_amount(cost)}{idle_text}。当前等级：{common.level_label(int(state[kind]))}。")
 
 
 async def handle_remake(event: dict[str, Any], ctx: dict[str, Any]) -> None:

@@ -143,14 +143,13 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
     if reversed_result:
         if use_main:
-            thief_balance = common.balance_of(thief)
-            if thief_balance <= 0:
+            if common.total_holding(thief) <= 0:
                 zhubi.save_data(data)
                 await ctx["reply"](event, f"偷鸡不成蚀把米！但你的{source_name}不足，无事发生。")
                 return
             ratio = random.uniform(0.01, 0.20)
-            steal_amount = common.truncate_decimal(thief_balance * ratio)
-            common.change_balance(thief, -steal_amount)
+            steal_amount = common.truncate_decimal(common.total_holding(thief) * ratio)
+            common.spend_amount(thief, float(steal_amount))
             common.change_balance(target, steal_amount)
             zhubi.save_data(data)
             remaining = "不限" if is_admin else str(max(0, zhuazhu_available(thief)))
@@ -174,7 +173,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             return
 
     if use_main:
-        common.change_balance(target, -steal_amount)
+        common.spend_amount(target, float(steal_amount))
         common.change_balance(thief, steal_amount)
         zhubi.save_data(data)
         remaining = "不限" if is_admin else str(max(0, zhuazhu_available(thief)))

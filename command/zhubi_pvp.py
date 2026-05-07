@@ -162,8 +162,8 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     clean_pending(data)
     challenger = zhubi.user_data(data, challenger_id)
     is_admin = ctx["is_admin_event"](event)
-    if common.balance_of(challenger) < amount:
-        await ctx["reply"](event, f"猪币不足。你当前持有：{common.format_amount(common.balance_of(challenger))}。")
+    if common.total_holding(challenger) < amount:
+        await ctx["reply"](event, f"猪币不足。你当前持有：{common.format_amount(common.total_holding(challenger))}。")
         zhubi.save_data(data)
         return
     key = challenge_key(group_id, challenger_id, target_id)
@@ -172,7 +172,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if pending and str(pending.get("from")) == target_id and str(pending.get("to")) == challenger_id:
         pending_amount = int(pending.get("amount", 0))
         target = zhubi.user_data(data, target_id)
-        if common.balance_of(target) < pending_amount:
+        if common.total_holding(target) < pending_amount:
             store.pop(key, None)
             zhubi.save_data(data)
             await ctx["reply"](event, f"{target_name} 猪币不足，PVP 已取消。")
@@ -186,7 +186,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         loser_amount = pending_amount if challenger_wins else amount
         reward = int(round(loser_amount * 0.75))
         pool_amount = max(0, loser_amount - reward)
-        common.change_balance(loser, -loser_amount)
+        common.spend_amount(loser, float(loser_amount))
         common.change_balance(winner, reward)
         mine_state = zhubi.normalize_mine_state(data)
         mine_state["pool"] = int(mine_state.get("pool", 0)) + pool_amount

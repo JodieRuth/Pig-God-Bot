@@ -128,14 +128,18 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if not is_bot_admin and used >= limit:
         await ctx["reply"](event, f"你今天已经发狂过了，今日已用：{used} 次，今日上限：{limit} 次。")
         return
-    balance = common.balance_of(user)
-    if amount > balance:
-        await ctx["reply"](event, f"猪币不足。你当前持有：{common.format_amount(balance)}。")
+    if common.total_holding(user) < amount:
+        await ctx["reply"](event, f"猪币不足。你当前持有：{common.format_amount(common.total_holding(user))}。")
         return
     returned = mining_return(amount, data)
     returned, pool_added, pool_bonus = apply_pool(amount, returned, data)
     update_mine_state(data, amount, returned)
-    user["balance"] = common.truncate_decimal(balance - float(amount) + float(returned))
+    spent = common.spend_amount(user, float(amount))
+    if spent is None:
+        await ctx["reply"](event, f"猪币不足。你当前持有：{common.format_amount(common.total_holding(user))}。")
+        return
+    main_spent, idle_spent = spent
+    user["balance"] = common.truncate_decimal(common.balance_of(user) + float(returned))
     user["total_mined_spent"] = int(user.get("total_mined_spent", 0)) + amount
     user["total_mined_returned"] = int(user.get("total_mined_returned", 0)) + returned
     user["mine_count"] = int(user.get("mine_count", 0)) + 1
@@ -148,7 +152,8 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     diff = returned - amount
     sign = "+" if diff >= 0 else ""
     pool_text = f"，猪池补贴：+{common.format_amount(pool_bonus)}" if pool_bonus > 0 else f"，进入猪池：{common.format_amount(pool_added)}" if pool_added > 0 else ""
-    await ctx["reply"](event, f"你投入了 {common.format_amount(amount)} 发狂，得到了 {common.format_amount(returned)}，本次收益：{sign}{common.format_amount(abs(diff))}{pool_text}。当前持有：{common.format_amount(user['balance'])}。")
+    idle_text = f"，从 idle 抵扣了 {common.format_amount(idle_spent)}" if idle_spent > 0 else ""
+    await ctx["reply"](event, f"你投入了 {common.format_amount(amount)} 发狂，得到了 {common.format_amount(returned)}，本次收益：{sign}{common.format_amount(abs(diff))}{pool_text}{idle_text}。当前持有：{common.format_amount(user['balance'])}。")
 
 
 COMMAND = {

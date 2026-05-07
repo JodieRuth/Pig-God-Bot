@@ -105,6 +105,36 @@ def change_balance(user: dict[str, Any], delta: int | float) -> None:
     user["balance"] = truncate_decimal(max(0.0, float(user.get("balance", 0.0)) + float(delta)))
 
 
+def total_holding(user: dict[str, Any]) -> float:
+    return balance_of(user) + idle_total_coins(idle_state(user))
+
+
+def spend_amount(user: dict[str, Any], amount: float) -> tuple[float, float] | None:
+    main = balance_of(user)
+    if main >= amount:
+        change_balance(user, -amount)
+        return float(amount), 0.0
+    idle = idle_state(user)
+    idle_total = idle_total_coins(idle)
+    needed = amount - main
+    if needed > idle_total:
+        return None
+    change_balance(user, -main)
+    idle_spent = truncate_decimal(needed)
+    max_part = float(idle.get("max", 0.0))
+    coin_part = float(idle.get("coins", 0.0))
+    remaining = idle_spent
+    if coin_part >= remaining:
+        idle["coins"] = truncate_decimal(coin_part - remaining)
+    else:
+        remaining -= coin_part
+        used_max = int(math.ceil(remaining / MAX_UNIT))
+        idle["max"] = max(0.0, max_part - used_max)
+        idle["coins"] = truncate_decimal(used_max * MAX_UNIT - remaining)
+    normalize_idle_units(idle)
+    return float(main), idle_spent
+
+
 def idle_state(user: dict[str, Any]) -> dict[str, Any]:
     state = user.setdefault("idle", {})
     if not isinstance(state, dict):
