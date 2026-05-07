@@ -161,6 +161,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     common.apply_idle_income(data)
     clean_pending(data)
     challenger = zhubi.user_data(data, challenger_id)
+    is_admin = ctx["is_admin_event"](event)
     if common.balance_of(challenger) < amount:
         await ctx["reply"](event, f"猪币不足。你当前持有：{common.format_amount(common.balance_of(challenger))}。")
         zhubi.save_data(data)
@@ -193,22 +194,23 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         zhubi.save_data(data)
         await ctx["reply"](event, f"PVP 开始！{challenger_name} 投入 {common.format_amount(amount)}，{target_name} 投入 {common.format_amount(pending_amount)}。{challenger_name} 胜率 {challenger_probability:.1%}，{target_name} 胜率 {1 - challenger_probability:.1%}。胜者：{winner_name}，获得败者投入的 75%：{common.format_amount(reward)}；败者：{loser_name}，损失 {common.format_amount(loser_amount)}；进入猪池：{common.format_amount(pool_amount)}。")
         return
-    if user_has_pending(store, challenger_id):
+    if not is_admin and user_has_pending(store, challenger_id):
         zhubi.save_data(data)
         await ctx["reply"](event, "你当前已经在一个 PVP 挑战中，需等待应战、结算或 15 分钟超时后才能再次发起。")
         return
-    if user_has_pending(store, target_id):
+    if not is_admin and user_has_pending(store, target_id):
         zhubi.save_data(data)
         await ctx["reply"](event, f"{target_name} 当前已经在一个 PVP 挑战中，暂时不能被挑战。")
         return
-    if pvp_available(challenger) <= 0:
+    if not is_admin and pvp_available(challenger) <= 0:
         zhubi.save_data(data)
         await ctx["reply"](event, "你今天的 PVP 发起次数已经用完。")
         return
-    challenger["daily_pvp_used"] = int(challenger.get("daily_pvp_used", 0)) + 1
+    if not is_admin:
+        challenger["daily_pvp_used"] = int(challenger.get("daily_pvp_used", 0)) + 1
     store[key] = {"from": challenger_id, "to": target_id, "amount": amount, "group_id": group_id, "time": time.time()}
     zhubi.save_data(data)
-    await ctx["reply"](event, f"{challenger_name} 向 {target_name} 发起猪币 PVP，投入 {common.format_amount(amount)}。{target_name} 15 分钟内输入 /zhubi_pvp {challenger_id} <投入数量> 即可应战，应战不消耗次数；双方投入可不同，胜率按投入比例计算并限制在 25% 到 75%。今日剩余发起次数：{max(0, pvp_available(challenger))}。")
+    await ctx["reply"](event, f"{challenger_name} 向 {target_name} 发起猪币 PVP，投入 {common.format_amount(amount)}。{target_name} 15 分钟内输入 /zhubi_pvp {challenger_id} <投入数量> 即可应战，应战不消耗次数；双方投入可不同，胜率按投入比例计算并限制在 25% 到 75%。今日剩余发起次数：{'不限' if is_admin else str(max(0, pvp_available(challenger)))}。")
 
 
 COMMAND = {

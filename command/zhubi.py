@@ -104,6 +104,8 @@ def normalize_user_data(user: dict[str, Any]) -> dict[str, Any]:
     user.setdefault("daily_fakuang_extra", 0)
     user.setdefault("daily_pvp_used", 0)
     user.setdefault("daily_pvp_extra", 0)
+    user.setdefault("daily_zhuazhu_used", 0)
+    user.setdefault("daily_zhuazhu_extra", 0)
     user.setdefault("total_claimed", 0)
     user.setdefault("total_mined_spent", 0)
     user.setdefault("total_mined_returned", 0)
@@ -163,6 +165,8 @@ def load_data() -> dict[str, Any]:
                 user["daily_fakuang_extra"] = 0
                 user["daily_pvp_used"] = 0
                 user["daily_pvp_extra"] = 0
+                user["daily_zhuazhu_used"] = 0
+                user["daily_zhuazhu_extra"] = 0
     return data
 
 
