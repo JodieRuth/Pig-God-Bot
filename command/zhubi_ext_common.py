@@ -202,7 +202,7 @@ def milestone_index(total: float) -> int:
 def apply_idle_income_to_user(user: dict[str, Any], now: float | None = None) -> tuple[bool, int, str, float]:
     state = idle_state(user)
     current = time.time() if now is None else now
-    last_tick = max(float(state.get("last_tick", SESSION_STARTED)), SESSION_STARTED)
+    last_tick = float(state.get("last_tick", current))
     elapsed = max(0, int(current - last_tick))
     state["last_tick"] = last_tick + elapsed
     if elapsed <= 0 or state.get("cleared"):
