@@ -253,12 +253,12 @@ async def everything_report(ctx: dict[str, Any], base_url: str, headers: dict[st
     return lines
 
 
-async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
+async def _run_test(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> list[str] | None:
     common.flush_idle_data()
     ctx["reload_runtime_files"]()
     if not ctx["is_admin_event"](event):
         await ctx["reply"](event, "你没有权限使用测试指令。")
-        return
+        return None
 
     is_everything = arg.strip().lower() == "everything"
     onebot_http = os.getenv("ONEBOT_HTTP", "http://127.0.0.1:3000").rstrip("/")
@@ -282,7 +282,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     plugins = ctx.get("plugins", {})
 
     console_log = ctx.get("console_log") or ctx.get("log")
-    results = []
+    results: list[str] = []
 
     def report(line: str = "") -> None:
         results.append(line)
@@ -415,12 +415,34 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
                 model_list.append(model)
         report(", ".join(model_list))
 
+    return results
+
+
+async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
+    results = await _run_test(event, arg, ctx)
+    if results is None:
+        return
     await ctx["reply_forward"](event, results)
 
 
-COMMAND = {
-    "name": "/test",
-    "usage": "/test [everything]",
-    "description": "仅所有者可用：轮询所有远端接口、显示可用模型、当前工具列表和脱敏运行参数；everything 额外列出插件订阅、好友群聊数量、命令和检查点。",
-    "handler": handler,
-}
+async def handler_show(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
+    results = await _run_test(event, arg, ctx)
+    if results is None:
+        return
+    await ctx["reply"](event, "\n".join(results))
+
+
+COMMANDS = [
+    {
+        "name": "/test",
+        "usage": "/test [everything]",
+        "description": "仅所有者可用：轮询远端接口、显示模型与运行参数，以转发聊天集合发送。",
+        "handler": handler,
+    },
+    {
+        "name": "/test_show",
+        "usage": "/test_show [everything]",
+        "description": "仅所有者可用：功能同/test，直接回复消息。",
+        "handler": handler_show,
+    },
+]

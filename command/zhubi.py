@@ -272,6 +272,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 COMMAND = {
     "name": "/zhubi",
     "usage": "/zhubi [show | add <QQ号> <猪币数量或nMAX+数字>]",
-    "description": "领取猪币；show 查看钱包和 idle 参数；add 仅所有者可用，数量支持 40MAX+12000000。",
+    "description": "每日一次随机1~3000猪币；show查看钱包与idle参数；add仅所有者可用。",
     "handler": handler,
 }

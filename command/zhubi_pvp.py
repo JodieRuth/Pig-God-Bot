@@ -114,20 +114,36 @@ async def handle_add(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> bo
     return True
 
 
+def extract_at_target(message: list[dict[str, Any]]) -> int | None:
+    for seg in message:
+        if seg.get("type") == "at":
+            qq = str(seg.get("data", {}).get("qq") or "")
+            if qq.isdigit():
+                return int(qq)
+    return None
+
+
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if await handle_add(event, arg, ctx):
         return
     if event.get("message_type") != "group":
         await ctx["reply"](event, "/zhubi_pvp 只能在群聊中使用。")
         return
-    parts = arg.split()
-    if len(parts) != 2 or not parts[0].isdigit():
-        await ctx["reply"](event, "用法：/zhubi_pvp <QQ号> <猪币数量或nMAX+数字>；仅所有者：/zhubi_pvp add <QQ号> <今日额外次数>")
-        return
     group_id = int(event.get("group_id", 0))
     challenger_id = str(event.get("user_id", 0))
-    target_id = parts[0]
-    amount = common.parse_positive_int(parts[1])
+    message = event.get("message", [])
+    at_target = extract_at_target(message)
+    if at_target is not None:
+        target_id = str(at_target)
+        parts = arg.split()
+        amount = common.parse_positive_int(parts[-1]) if parts else None
+    else:
+        parts = arg.split()
+        if len(parts) != 2 or not parts[0].isdigit():
+            await ctx["reply"](event, "用法：/zhubi_pvp <QQ号或@某人> <猪币数量或nMAX+数字>；仅所有者：/zhubi_pvp add <QQ号> <今日额外次数>")
+            return
+        target_id = parts[0]
+        amount = common.parse_positive_int(parts[1])
     if amount is None:
         await ctx["reply"](event, "PVP 投入数量必须是正数，支持 40MAX+12000000 格式；不足 1 的部分不会用于 PVP。")
         return
@@ -197,7 +213,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
 COMMAND = {
     "name": "/zhubi_pvp",
-    "usage": "/zhubi_pvp <QQ号> <猪币数量或nMAX+数字>；仅所有者：/zhubi_pvp add <QQ号> <今日额外次数>",
-    "description": "指定本群另一个成员发起猪币 PVP，每人每天 3 次发起次数，投入支持 40MAX+12000000，败者未给赢家的 25% 进入猪池。",
+    "usage": "/zhubi_pvp <QQ号或@某人> <猪币数量或nMAX+数字>；仅所有者：/zhubi_pvp add <QQ号> <今日额外次数>",
+    "description": "发起猪币 PVP，支持@对象，每人每天3次发起机会，败者25%损失入猪池。",
     "handler": handler,
 }

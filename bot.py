@@ -745,8 +745,8 @@ async def reply_forward(event: dict[str, Any], lines: list[str]) -> None:
         messages.append({
             "type": "node",
             "data": {
-                "name": bot_name,
-                "uin": bot_qq,
+                "nickname": bot_name,
+                "user_id": bot_qq,
                 "content": [{"type": "text", "data": {"text": "\n".join(section)}}],
             },
         })
