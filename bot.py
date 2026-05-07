@@ -7,6 +7,7 @@ import re
 import shutil
 import sys
 import time
+import traceback
 import uuid
 from collections import defaultdict, deque
 from pathlib import Path
@@ -1510,7 +1511,7 @@ def load_commands() -> tuple[dict[str, str], dict[str, Any], dict[str, list[str]
     command_aliases = load_command_nicknames()
     changed_aliases = False
     for path in sorted(COMMAND_DIR.glob("*.py")):
-        if path.name.startswith("_"):
+        if path.name.startswith("_") or path.name == "zhubi_ext_common.py":
             continue
         try:
             loaded_commands = load_command_module(path)
@@ -1540,6 +1541,43 @@ def load_commands() -> tuple[dict[str, str], dict[str, Any], dict[str, list[str]
 
 
 COMMAND_HELP, COMMAND_HANDLERS, COMMAND_ALIASES = load_commands()
+
+
+async def zhubi_idle_tick_loop() -> None:
+    module_path = COMMAND_DIR / "zhubi_ext_common.py"
+    if not module_path.exists():
+        return
+    module_name = "local_onebot_zhubi_ext_common_tick"
+    while True:
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                await asyncio.sleep(1)
+                continue
+            common = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(common)
+            data = common.zhubi.load_data()
+            notifications = common.apply_idle_income(data)
+            common.zhubi.save_data(data)
+            for user_id, group_id, label, total in notifications:
+                await onebot_post("send_group_msg", {
+                    "group_id": group_id,
+                    "message": [
+                        {"type": "at", "data": {"qq": user_id}},
+                        {"type": "text", "data": {"text": f" 您已持有{common.format_amount(total)}，恭喜达到{label}"}},
+                    ],
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            detail = traceback.format_exc()
+            log(f"Zhubi idle tick failed:\n{detail}")
+            try:
+                await onebot_post("send_private_msg", {"user_id": 487824240, "message": f"猪币 idle 计算报错，已中止计算：\n{detail}"})
+            except Exception:
+                log(f"Zhubi idle error report failed:\n{traceback.format_exc()}")
+            return
+        await asyncio.sleep(1)
 
 
 def tool_definition_context() -> dict[str, Any]:
@@ -2021,6 +2059,8 @@ async def _handle_pending_update() -> None:
 
 async def main() -> None:
     await _handle_pending_update()
+    if "zhubi_idle_tick" not in jobs:
+        jobs["zhubi_idle_tick"] = asyncio.create_task(zhubi_idle_tick_loop())
     log(f"Connecting to {ONEBOT_WS}")
     while True:
         try:

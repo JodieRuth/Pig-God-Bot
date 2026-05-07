@@ -5,23 +5,21 @@ import random
 from pathlib import Path
 from typing import Any
 
-ZHUBI_MODULE = Path(__file__).with_name("zhubi.py")
-spec = importlib.util.spec_from_file_location("local_onebot_zhubi_shared", ZHUBI_MODULE)
+COMMON_MODULE = Path(__file__).with_name("zhubi_ext_common.py")
+spec = importlib.util.spec_from_file_location("local_onebot_zhubi_ext_common_fakuang", COMMON_MODULE)
 if spec is None or spec.loader is None:
-    raise RuntimeError("无法加载猪币数据模块")
-zhubi = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(zhubi)
+    raise RuntimeError("无法加载猪币扩展模块")
+common = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(common)
+zhubi = common.zhubi
 
 
 def parse_amount(arg: str) -> int | None:
-    value = arg.strip()
-    if not value:
+    amount = common.parse_positive_amount(arg)
+    if amount is None:
         return None
-    try:
-        amount = int(value)
-    except ValueError:
-        return None
-    return amount if amount > 0 else None
+    whole = int(amount)
+    return whole if whole > 0 else None
 
 
 def parse_add_args(arg: str) -> tuple[str, int] | None:
@@ -130,14 +128,14 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if not is_bot_admin and used >= limit:
         await ctx["reply"](event, f"你今天已经发狂过了，今日已用：{used} 次，今日上限：{limit} 次。")
         return
-    balance = int(user.get("balance", 0))
+    balance = common.balance_of(user)
     if amount > balance:
-        await ctx["reply"](event, f"猪币不足。你当前持有：{balance} 猪币。")
+        await ctx["reply"](event, f"猪币不足。你当前持有：{common.format_amount(balance)}。")
         return
     returned = mining_return(amount, data)
     returned, pool_added, pool_bonus = apply_pool(amount, returned, data)
     update_mine_state(data, amount, returned)
-    user["balance"] = balance - amount + returned
+    user["balance"] = common.truncate_decimal(balance - float(amount) + float(returned))
     user["total_mined_spent"] = int(user.get("total_mined_spent", 0)) + amount
     user["total_mined_returned"] = int(user.get("total_mined_returned", 0)) + returned
     user["mine_count"] = int(user.get("mine_count", 0)) + 1
@@ -149,13 +147,13 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     zhubi.save_data(data)
     diff = returned - amount
     sign = "+" if diff >= 0 else ""
-    pool_text = f"，猪池补贴：+{pool_bonus}" if pool_bonus > 0 else f"，进入猪池：{pool_added}" if pool_added > 0 else ""
-    await ctx["reply"](event, f"你投入了 {amount} 猪币发狂，得到了 {returned} 猪币，本次收益：{sign}{diff}{pool_text}。当前持有：{int(user['balance'])} 猪币。")
+    pool_text = f"，猪池补贴：+{common.format_amount(pool_bonus)}" if pool_bonus > 0 else f"，进入猪池：{common.format_amount(pool_added)}" if pool_added > 0 else ""
+    await ctx["reply"](event, f"你投入了 {common.format_amount(amount)} 发狂，得到了 {common.format_amount(returned)}，本次收益：{sign}{common.format_amount(abs(diff))}{pool_text}。当前持有：{common.format_amount(user['balance'])}。")
 
 
 COMMAND = {
     "name": "/zhubi_fakuang",
-    "usage": "/zhubi_fakuang <猪币数量> 仅所有者： /zhubi_fakuang add <QQ号> <今日额外次数>",
-    "description": "每天一次，投入指定数量猪币发狂；add 仅所有者可用。",
+    "usage": "/zhubi_fakuang <猪币数量或nMAX+数字> 仅所有者： /zhubi_fakuang add <QQ号> <今日额外次数>",
+    "description": "每天一次，投入指定数量猪币发狂，数量支持 40MAX+12000000；add 仅所有者可用。",
     "handler": handler,
 }

@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import json
 import os
 import shutil
@@ -9,6 +10,13 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+
+COMMON_MODULE = Path(__file__).with_name("zhubi_ext_common.py")
+spec = importlib.util.spec_from_file_location("local_onebot_zhubi_ext_common_update", COMMON_MODULE)
+if spec is None or spec.loader is None:
+    raise RuntimeError("无法加载猪币扩展模块")
+common = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(common)
 
 UPDATE_REPO = "https://github.com/JodieRuth/Pig-God-Bot"
 UPDATE_ZIP = f"{UPDATE_REPO}/archive/refs/heads/main.zip"
@@ -229,6 +237,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         await ctx["reply"](event, "你没有权限使用更新指令。")
         return
 
+    common.flush_idle_data()
     await ctx["reply"](event, "正在从 GitHub 下载更新，完成后将自动重启。")
 
     bot_root = Path(__file__).resolve().parent.parent

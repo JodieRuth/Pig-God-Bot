@@ -7,9 +7,17 @@ from pathlib import Path
 from typing import Any
 
 import asyncio
+import importlib.util
 
 import aiohttp
 import websockets
+
+COMMON_MODULE = Path(__file__).with_name("zhubi_ext_common.py")
+spec = importlib.util.spec_from_file_location("local_onebot_zhubi_ext_common_test", COMMON_MODULE)
+if spec is None or spec.loader is None:
+    raise RuntimeError("无法加载猪币扩展模块")
+common = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(common)
 
 
 def api_base(url: str) -> str:
@@ -246,6 +254,7 @@ async def everything_report(ctx: dict[str, Any], base_url: str, headers: dict[st
 
 
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
+    common.flush_idle_data()
     ctx["reload_runtime_files"]()
     if not ctx["is_admin_event"](event):
         await ctx["reply"](event, "你没有权限使用测试指令。")
