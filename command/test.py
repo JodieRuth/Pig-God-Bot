@@ -207,6 +207,7 @@ async def everything_report(ctx: dict[str, Any], base_url: str, headers: dict[st
     else:
         lines.append("无")
 
+    lines.append("")
     try:
         friend_list = await onebot_get("get_friend_list", {}, base_url, headers)
         friend_count = len(friend_list) if isinstance(friend_list, list) else 0
@@ -228,6 +229,7 @@ async def everything_report(ctx: dict[str, Any], base_url: str, headers: dict[st
     lines.append(f"QQ 好友数量: {friend_text}")
     lines.append(f"群聊数量: {group_text}")
 
+    lines.append("")
     command_items = ctx.get("command_help_items", {})
     lines.append("当前激活的所有可用命令：")
     if command_items:
@@ -237,6 +239,7 @@ async def everything_report(ctx: dict[str, Any], base_url: str, headers: dict[st
     else:
         lines.append("无")
 
+    lines.append("")
     lines.append(f"当前检查点: {current_checkpoint(root)}")
     lines.append(f"上一次更新距今: {last_update_elapsed(root)}")
     return lines
@@ -377,6 +380,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             continue
         test_status, test_detail, test_model = test_result  # type: ignore[misc]
         report(f"LLM #{config.get('index')}{active}: {test_status} - {test_detail}，测试模型 {test_model}，模型数 {len(models)}")
+    report()
     for pos in sorted(image_results):
         models, models_error = image_results[pos]
         config = image_configs[pos - len(llm_configs)]

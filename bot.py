@@ -724,27 +724,39 @@ async def reply(event: dict[str, Any], message: str | list[dict[str, Any]]) -> N
 
 
 async def reply_forward(event: dict[str, Any], lines: list[str]) -> None:
-    non_empty = [line for line in lines if line]
-    if not non_empty:
+    sections: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line:
+            current.append(line)
+            continue
+        if current:
+            sections.append(current)
+            current = []
+    if current:
+        sections.append(current)
+    if not sections:
         return
     bot_qq = os.getenv("BOT_QQ", "")
     bot_name = os.getenv("BOT_NAME", "") or "Bot"
-    messages: list[dict[str, Any]] = [{
-        "type": "node",
-        "data": {
-            "name": bot_name,
-            "uin": bot_qq,
-            "content": [{"type": "text", "data": {"text": "\n".join(non_empty)}}],
-        },
-    }]
+    messages: list[dict[str, Any]] = []
+    for section in sections:
+        messages.append({
+            "type": "node",
+            "data": {
+                "name": bot_name,
+                "uin": bot_qq,
+                "content": [{"type": "text", "data": {"text": "\n".join(section)}}],
+            },
+        })
     try:
         if event.get("message_type") == "group":
             await onebot_post("send_group_forward_msg", {"group_id": event["group_id"], "messages": messages})
         else:
             await onebot_post("send_private_forward_msg", {"user_id": event["user_id"], "messages": messages})
     except Exception as exc:
-        log(f"Forward message failed, falling back to plain text: {exc}")
-        await reply(event, "\n".join(non_empty))
+        log(f"Forward message failed: {exc}")
+        await reply(event, "转发消息失败。")
 
 
 def qq_avatar_url(qq: int | str, size: int = 640) -> str:
