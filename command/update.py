@@ -19,8 +19,7 @@ UPDATE_MIRROR_PREFIXES = [
 ]
 PRESERVE_FILES = {".env", "runtime_state.json", ".pending_update.json"}
 ALLOWED_JSON_FILES = {
-    "command_nickname.json",
-    "prompts.json",
+    "command_nickname.json"
     "command/haochi/drinks.json",
     "command/haochi/foods.json",
 }
