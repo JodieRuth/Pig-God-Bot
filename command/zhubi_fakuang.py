@@ -150,7 +150,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     data["global"]["mine_count"] = int(data["global"].get("mine_count", 0)) + 1
     zhubi.save_data(data)
     diff = returned - amount
-    sign = "+" if diff >= 0 else ""
+    sign = "+" if diff >= 0 else "-"
     pool_text = f"，猪池补贴：+{common.format_amount(pool_bonus)}" if pool_bonus > 0 else f"，进入猪池：{common.format_amount(pool_added)}" if pool_added > 0 else ""
     idle_text = f"，从 idle 抵扣了 {common.format_amount(idle_spent)}" if idle_spent > 0 else ""
     await ctx["reply"](event, f"你投入了 {common.format_amount(amount)} 发狂，得到了 {common.format_amount(returned)}，本次收益：{sign}{common.format_amount(abs(diff))}{pool_text}{idle_text}。当前持有：{common.format_amount(user['balance'])}。")
