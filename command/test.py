@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import asyncio
@@ -135,12 +136,119 @@ async def check_chat(config: dict[str, str], model: str) -> tuple[str, str]:
         return "FAIL", f"{type(exc).__name__}: {cost}ms"
 
 
+async def onebot_get(action: str, payload: dict[str, Any], base_url: str, headers: dict[str, str]) -> Any:
+    async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as session:
+        async with session.post(f"{base_url}/{action}", json=payload) as resp:
+            body = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status}")
+            data = json.loads(body) if body else None
+    if isinstance(data, dict) and "data" in data and ("status" in data or "retcode" in data):
+        return data.get("data")
+    return data
+
+
+def format_elapsed_cn(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, sec = divmod(remainder, 60)
+    if days:
+        return f"{days}天{hours}小时{minutes}分"
+    if hours:
+        return f"{hours}小时{minutes}分{sec}秒"
+    if minutes:
+        return f"{minutes}分{sec}秒"
+    return f"{sec}秒"
+
+
+def subscriptions_text(subscriptions: dict[str, Any]) -> str:
+    groups = sorted(int(item) for item in subscriptions.get("groups", set()))
+    private_users = sorted(int(item) for item in subscriptions.get("private_users", set()))
+    parts = []
+    parts.append(f"群聊: {', '.join(str(item) for item in groups) if groups else '无'}")
+    parts.append(f"私聊: {', '.join(str(item) for item in private_users) if private_users else '无'}")
+    return "；".join(parts)
+
+
+def rollback_timestamps(root: Path) -> list[str]:
+    rollback_root = root / "rollback"
+    if not rollback_root.exists():
+        return []
+    return [entry.name for entry in sorted(rollback_root.iterdir(), reverse=True) if entry.is_dir()]
+
+
+def current_checkpoint(root: Path) -> str:
+    timestamps = rollback_timestamps(root)
+    if timestamps:
+        return timestamps[0]
+    return "当前工作区（无 rollback 检查点）"
+
+
+def last_update_elapsed(root: Path) -> str:
+    candidates = [root / ".pending_update.json", root / "bot.py", root / "command" / "update.py"]
+    existing = [path for path in candidates if path.exists()]
+    if not existing:
+        return "未知"
+    latest = max(path.stat().st_mtime for path in existing)
+    return format_elapsed_cn(time.time() - latest)
+
+
+async def everything_report(ctx: dict[str, Any], base_url: str, headers: dict[str, str]) -> list[str]:
+    lines: list[str] = []
+    root = Path(__file__).resolve().parent.parent
+    plugins = ctx.get("plugins", {})
+    lines.append("everything：")
+    lines.append("插件与订阅者：")
+    if plugins:
+        for name, plugin in sorted(plugins.items()):
+            subscriptions = plugin.get("subscriptions", {}) if isinstance(plugin, dict) else {}
+            lines.append(f"{name}: {subscriptions_text(subscriptions)}")
+    else:
+        lines.append("无")
+
+    try:
+        friend_list = await onebot_get("get_friend_list", {}, base_url, headers)
+        friend_count = len(friend_list) if isinstance(friend_list, list) else 0
+    except Exception as exc:
+        friend_count = -1
+        friend_error = f"{type(exc).__name__}"
+    else:
+        friend_error = ""
+    try:
+        group_list = await onebot_get("get_group_list", {}, base_url, headers)
+        group_count = len(group_list) if isinstance(group_list, list) else 0
+    except Exception as exc:
+        group_count = -1
+        group_error = f"{type(exc).__name__}"
+    else:
+        group_error = ""
+    friend_text = str(friend_count) if friend_count >= 0 else f"获取失败（{friend_error}）"
+    group_text = str(group_count) if group_count >= 0 else f"获取失败（{group_error}）"
+    lines.append(f"QQ 好友数量: {friend_text}")
+    lines.append(f"群聊数量: {group_text}")
+
+    command_items = ctx.get("command_help_items", {})
+    lines.append("当前激活的所有可用命令：")
+    if command_items:
+        for usage, description in sorted(command_items.items()):
+            lines.append(f"{usage} - {description}")
+        lines.append("/plugins - 查看和管理群插件。")
+    else:
+        lines.append("无")
+
+    lines.append(f"当前检查点: {current_checkpoint(root)}")
+    lines.append(f"上一次更新距今: {last_update_elapsed(root)}")
+    return lines
+
+
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     ctx["reload_runtime_files"]()
     if not ctx["is_admin_event"](event):
         await ctx["reply"](event, "你没有权限使用测试指令。")
         return
 
+    is_everything = arg.strip().lower() == "everything"
     onebot_http = os.getenv("ONEBOT_HTTP", "http://127.0.0.1:3000").rstrip("/")
     onebot_ws = os.getenv("ONEBOT_WS", "ws://127.0.0.1:3001")
     onebot_token = os.getenv("ONEBOT_TOKEN", "")
@@ -218,6 +326,11 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     else:
         report()
         report("当前存在插件：无")
+
+    if is_everything:
+        report()
+        for line in await everything_report(ctx, onebot_http, headers_onebot):
+            report(line)
     report()
 
     async def _check_llm(pos: int, config: dict[str, str]) -> tuple[int, list[str], str, tuple[str, str, str] | None]:
@@ -294,7 +407,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
 COMMAND = {
     "name": "/test",
-    "usage": "/test",
-    "description": "仅所有者可用：轮询所有远端接口、显示可用模型、当前工具列表和脱敏运行参数。",
+    "usage": "/test [everything]",
+    "description": "仅所有者可用：轮询所有远端接口、显示可用模型、当前工具列表和脱敏运行参数；everything 额外列出插件订阅、好友群聊数量、命令和检查点。",
     "handler": handler,
 }

@@ -307,7 +307,7 @@ def reload_env_config(force: bool = False) -> bool:
     ONEBOT_HTTP = os.getenv("ONEBOT_HTTP", "http://127.0.0.1:3000").rstrip("/")
     ONEBOT_WS = os.getenv("ONEBOT_WS", "ws://127.0.0.1:3001")
     ONEBOT_TOKEN = os.getenv("ONEBOT_TOKEN", "local_onebot_token")
-    BOT_QQ = os.getenv("BOT_QQ", "2579744278")
+    BOT_QQ = os.getenv("BOT_QQ", "3170056734")
     BOT_NAME = os.getenv("BOT_NAME", "").strip()
     ADMIN_USERS = {int(x) for x in os.getenv("ADMIN_USERS", "").split(",") if x.strip().isdigit()}
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -1364,11 +1364,15 @@ def command_context() -> dict[str, Any]:
     return {
         "reply": reply,
         "reply_forward": reply_forward,
+        "onebot_post": onebot_post,
         "is_controller": is_controller,
         "is_admin_event": lambda event: is_admin_user(int(event.get("user_id", 0))),
         "jobs": jobs,
         "bot_state": bot_state,
         "command_help_text": command_help_text,
+        "command_help_items": COMMAND_HELP,
+        "command_handlers": COMMAND_HANDLERS,
+        "command_aliases": COMMAND_ALIASES,
         "plugin_help_text": plugin_help_text,
         "plugin_enabled_for_event": plugin_enabled_for_event,
         "plugins": PLUGINS,
@@ -1806,9 +1810,22 @@ def is_stopped_allowed_command_text(text: str) -> bool:
     return command in {"/restart", "/reboot"} or (command == "/stop" and arg == "/reboot")
 
 
+async def handle_request_event(event: dict[str, Any]) -> None:
+    request_type = str(event.get("request_type") or "").lower()
+    sub_type = str(event.get("sub_type") or "").lower()
+    user_id = int(event.get("user_id", 0))
+    flag = str(event.get("flag") or "").strip()
+    if request_type == "group" and sub_type == "invite" and flag and is_admin_user(user_id):
+        await onebot_post("set_group_add_request", {"flag": flag, "sub_type": sub_type, "approve": True})
+        log(f"Auto approved group invite from admin user {user_id} for group {event.get('group_id')}")
+
+
 async def handle_event(event: dict[str, Any]) -> None:
     try:
         reload_runtime_files()
+        if event.get("post_type") == "request":
+            await handle_request_event(event)
+            return
         if event.get("post_type") != "message":
             return
 
