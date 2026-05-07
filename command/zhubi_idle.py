@@ -14,14 +14,17 @@ spec.loader.exec_module(common)
 zhubi = common.zhubi
 
 
-def idle_summary(state: dict[str, Any], balance: int) -> str:
+def idle_summary(state: dict[str, Any], balance: float) -> str:
     total = common.idle_total_coins(state)
+    int_base = int(float(state.get("max", 0.0))) * common.MAX_UNIT + int(float(state.get("coins", 0.0)))
+    growth_per_sec = int_base * common.idle_unit_rate(state) * common.idle_multiplier(state)
     lines = [
         f"钱包猪币：{common.format_amount(balance)}",
         f"idle 猪币：{common.format_amount(total)}",
         f"MAX 储量：{int(float(state.get('max', 0.0)))}MAX",
         f"当前效率倍率：{common.idle_multiplier(state):.4f}x",
         f"每单位基础获取率：{common.idle_unit_rate(state):.6f}/秒",
+        f"idle 每秒增长速度：{common.format_amount(growth_per_sec)}",
         f"转生倍率：{1 + 0.15 * int(state.get('remakes', 0)):.2f}x",
         f"quality 等级：{common.level_label(int(state.get('quality', 0)))}，下级价格：{common.format_amount(common.upgrade_cost('quality', int(state.get('quality', 0))))}",
         f"efficiency 等级：{common.level_label(int(state.get('efficiency', 0)))}，下级价格：{common.format_amount(common.upgrade_cost('efficiency', int(state.get('efficiency', 0))))}",
@@ -101,7 +104,7 @@ async def handle_move(event: dict[str, Any], parts: list[str], ctx: dict[str, An
 
 
 async def handle_buy(event: dict[str, Any], parts: list[str], ctx: dict[str, Any]) -> None:
-    if len(parts) != 4 or parts[1].lower() != "update" or parts[2].lower() not in common.UPGRADE_BASE_COSTS:
+    if len(parts) != 3 or parts[1].lower() != "update" or parts[2].lower() not in common.UPGRADE_BASE_COSTS:
         await ctx["reply"](event, "用法：/zhubi_idle buy update quality|efficiency|speed")
         return
     kind = parts[2].lower()

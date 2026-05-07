@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import importlib.util
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -228,10 +229,13 @@ def idle_summary(user: dict[str, Any]) -> str:
     remake_multiplier = 1 + 0.15 * remakes
     unit_rate = 0.0001 + efficiency * 0.0001
     total_multiplier = quality_multiplier * speed_multiplier * remake_multiplier
+    int_base = int(max_count) * MAX_UNIT + int(coins)
+    growth_per_sec = int_base * unit_rate * total_multiplier
     return "\n".join([
         f"当前持有：{format_balance(user['balance'])}",
         f"idle 运作中：{format_balance(total)}",
-        f"idle 整数增长基数：{format_balance(int(max_count) * MAX_UNIT + int(coins))}",
+        f"idle 整数增长基数：{format_balance(int_base)}",
+        f"idle 每秒增长速度：{format_balance(growth_per_sec)}",
         f"quality 等级：{quality}，倍率：{quality_multiplier:.4f}x",
         f"efficiency 等级：{efficiency}，每单位基础获取率：{unit_rate:.6f}/秒",
         f"speed 等级：{speed}，倍率：{speed_multiplier:.4f}x",
@@ -248,6 +252,14 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     user_id = str(event.get("user_id", 0))
     user = user_data(data, user_id)
     if arg.strip().lower() == "show":
+        COMMON_MODULE = Path(__file__).with_name("zhubi_ext_common.py")
+        spec = importlib.util.spec_from_file_location("local_onebot_zhubi_ext_common_show", COMMON_MODULE)
+        if spec is None or spec.loader is None:
+            await ctx["reply"](event, "无法加载猪币扩展模块。")
+            return
+        common = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(common)
+        common.apply_idle_income(data)
         save_data(data)
         await ctx["reply"](event, idle_summary(user))
         return
