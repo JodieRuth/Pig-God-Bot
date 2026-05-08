@@ -2776,13 +2776,7 @@ async def stop_searxng_server() -> None:
     global SEARXNG_PROCESS
     if SEARXNG_PROCESS is None or SEARXNG_PROCESS.returncode is not None:
         return
-    if os.name == "nt":
-        try:
-            SEARXNG_PROCESS.send_signal(signal.CTRL_BREAK_EVENT)
-        except Exception:
-            SEARXNG_PROCESS.terminate()
-    else:
-        SEARXNG_PROCESS.terminate()
+    SEARXNG_PROCESS.terminate()
     try:
         await asyncio.wait_for(SEARXNG_PROCESS.wait(), timeout=5)
     except asyncio.TimeoutError:
