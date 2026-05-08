@@ -445,6 +445,8 @@ DEBUG_LOG = os.getenv("DEBUG_LOG", "1") != "0"
 
 def prompt_value(key: str, scope_key: str = "") -> str:
     value = active_prompt_config(scope_key).get(key, "")
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value if item)
     return str(value) if value else ""
 
 
