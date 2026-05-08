@@ -46,7 +46,7 @@ def compact_json(data: Any) -> str:
     text = json.dumps(data, ensure_ascii=False, indent=2)
     if len(text) <= MAX_CONTENT_CHARS:
         return text
-    return text[:MAX_CONTENT_CHARS] + "\n...内容过长已截断，请降低 limit 或关闭 detail 后重试。"
+    return text[:MAX_CONTENT_CHARS] + "\n...内容过长已截断。请基于已有内容回答；如信息不足，请让用户缩小范围或明确需要的字段。"
 
 
 def content_for(title: str, payload: dict[str, Any], data: dict[str, Any]) -> str:
@@ -100,12 +100,12 @@ def update_definition() -> dict[str, Any]:
 def search_definition() -> dict[str, Any]:
     return base_definition(
         "vndb_search",
-        "搜索本地 VNDB 索引中的视觉小说或角色。实际逻辑：mode=vn/game 时搜索 VN 标题、原名、别名、v{id}；mode=character 时搜索角色名、原名、别名、c{id}，若角色没有直接命中，会把输入当 VN 名搜索并返回该 VN 里的角色。返回 slimVn/slimCharacter，VN 含 tagIds/tagVndbIds/tags、评分、投票、开发商和封面 ID，角色含 traitIds/traitVndbIds/traits、出演 VN、性别与人气分。detail=false 即可；detail=true 会展开 Tag/Trait 多语言元信息，响应明显变大，无必要不要开启。",
+        "搜索本地 VNDB 索引中的视觉小说或角色。实际逻辑：mode=vn/game 时搜索 VN 标题、原名、别名、v{id}；mode=character 时搜索角色名、原名、别名、c{id}，若角色没有直接命中，会把输入当 VN 名搜索并返回该 VN 里的角色。多结果默认只返回名称、ID、别名、评分/人气等摘要字段；只有命中唯一结果或用户明确要求 detail=true 时才返回 tags/traits 等较详细字段。需要作品/角色精确信息时，拿 vndbid 调 vndb_detail。若搜索无结果或结果不确定，不要反复换词重试；直接告诉用户未命中或让用户提供更准确名称/ID。",
         {
             "mode": {"type": "string", "enum": ["vn", "game", "character"], "description": "搜索目标类型：vn/game 表示视觉小说，character 表示角色。"},
             "name": {"type": "string", "description": "名称、别名、原名或 VNDB ID，例如 白色相簿、冬馬かずさ、v2920、c35176。"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "返回数量，默认 10。普通问答建议 5-10。"},
-            "detail": {"type": "boolean", "description": "是否返回 Tag/Trait 详细多语言元信息。默认 false；响应会变大，无必要不要开启。"},
+            "detail": {"type": "boolean", "description": "是否返回较详细 tags/traits。默认 false；多结果时不要开启。只有用户明确要求详细本地标签/特征，或确认只查单个结果时才使用。"},
         },
         ["mode", "name"],
     )
@@ -148,7 +148,7 @@ def recommend_definition() -> dict[str, Any]:
             "sort": {"type": "string", "enum": ["relevance", "rating", "votes", "title", "confidence"], "description": "排序字段，默认 relevance。"},
             "direction": {"type": "string", "enum": ["desc", "asc"], "description": "排序方向，默认 desc。"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "返回数量，默认 10。"},
-            "detail": {"type": "boolean", "description": "是否返回详细 tags/traits。默认 false；响应会变大，无必要不要开启。"},
+            "detail": {"type": "boolean", "description": "是否返回详细 tags/traits。默认 false；会增加响应体积。只有用户明确要求详细标签/特征时才开启；不要因结果不理想而试图开启。"},
         },
     )
 
@@ -172,7 +172,7 @@ def tag_search_definition() -> dict[str, Any]:
             "sort": {"type": "string", "enum": ["relevance", "rating", "votes", "title", "confidence"], "description": "排序字段，默认 relevance。"},
             "direction": {"type": "string", "enum": ["desc", "asc"], "description": "排序方向，默认 desc。"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "返回数量，默认 10。"},
-            "detail": {"type": "boolean", "description": "是否返回详细 tags/traits。默认 false；响应会变大，无必要不要开启。"},
+            "detail": {"type": "boolean", "description": "是否返回详细 tags/traits。默认 false；会增加响应体积。只有用户明确要求详细标签/特征时才开启；不要因结果不理想而自动开启。"},
         },
     )
 
@@ -193,7 +193,7 @@ def classify_definition() -> dict[str, Any]:
 def detail_definition() -> dict[str, Any]:
     return base_definition(
         "vndb_detail",
-        "获取某个 VN 或角色的本地索引信息和 VNDB API 完整详情。实际逻辑：可用 id/vndbid 精确定位 v{id}/c{id}，或用 name/query/q 先在本地索引搜索；VN 默认 fields 包括标题、别名、语言、平台、图片、长度、描述、评分、tags、开发商和关系，角色默认 fields 包括姓名、别名、描述、图片、身体资料、traits 和出演 VN。downloadImage/image 默认 true，会把 VNDB 图片下载到本地 cache/images 并把该图片塞进当前 LLM 上下文，使它临时成为后续 generate_image 可选择的图片编号；不会直接发 QQ。若 /switch photo false，本工具会强制不下载也不加入图片上下文。fields 是高阶参数，通常不要填写。",
+        "获取某个 VN 或角色的本地索引信息和来自 VNDB API 的详情。适合在 vndb_search 已确定唯一 vndbid 后调用；若名称不确定，先搜索一次即可，不要反复用不同拼写调用。实际逻辑：可用 id/vndbid 精确定位 v{id}/c{id}，或用 name/query/q 先在本地索引搜索；VN 默认 fields 包括标题、别名、语言、平台、图片、长度、描述、评分、tags、开发商和关系，角色默认 fields 包括姓名、别名、描述、图片、身体资料、traits 和出演 VN。downloadImage/image 默认 true，会把 VNDB 图片下载到本地 cache/images 并把该图片塞进当前上下文，使它临时成为后续 generate_image 可选择的图片编号。fields 是高阶参数，通常不要填写；只有用户明确要求特定 API 字段时使用。",
         {
             "mode": {"type": "string", "enum": ["vn", "game", "character"], "description": "目标类型。不传时服务会根据 id 推断；用名称查询时建议明确传 vn 或 character。"},
             "kind": {"type": "string", "enum": ["vn", "game", "character"], "description": "mode 的别名参数。"},
@@ -252,9 +252,9 @@ async def execute_action(action: str, args: dict[str, Any], runtime: dict[str, A
                     images.append(record)
                     del images[ctx.get("max_context_images", 10):]
                 index = images.index(record) + 1 if isinstance(images, list) and record in images else "?"
-                content += f"\n\n图片已加入当前 LLM 图片上下文，不会直接发送 QQ。后续如需生图，可在 generate_image 的 image_indexes 中选择图{index}。"
+                content += f"\n\n图片已加入当前 LLM 图片上下文。后续如需生图，可在 generate_image 的 image_indexes 中选择图{index}。"
             else:
                 content += f"\n\n图片已下载到本地缓存，但当前上下文不支持注入图片: {path}"
     elif action == "detail":
-        content += "\n\n当前 /switch photo false，已按要求不下载也不加入图片上下文。"
+        content += "\n\n当前 /switch photo false，图片不会被下载。"
     return {"ok": True, "content": content, "raw_result": data}

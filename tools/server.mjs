@@ -1201,6 +1201,41 @@ function characterDisplayScore(character, preferAverage = false) {
   return preferAverage ? characterAverageScore(character) * 10 + character.score / 100 : character.score;
 }
 
+function vnSearchSummary(vn, extra = {}) {
+  return {
+    id: vn.id,
+    vndbid: `v${vn.id}`,
+    title: vn.title,
+    original: vn.original,
+    aliases: splitAliases(vn.aliases).slice(0, 5),
+    rating: vn.rating,
+    votes: vn.votes,
+    developers: vn.developers.map((item) => ({ id: item.id, name: item.name })).slice(0, 3),
+    ...extra
+  };
+}
+
+function characterSearchSummary(character, extra = {}) {
+  return {
+    id: character.id,
+    vndbid: `c${character.id}`,
+    name: character.name,
+    original: character.original,
+    aliases: splitAliases(character.aliases).slice(0, 5),
+    sex: character.sex,
+    gender: character.gender,
+    score: character.score,
+    vns: character.vns.slice(0, 5).map(([id, role, spoiler]) => ({ id, vndbid: `v${id}`, role, spoiler, title: vnById.get(id)?.title ?? null })),
+    ...extra
+  };
+}
+
+function searchOutput(results, summaryMapper, detailMapper, detail) {
+  const selected = results.slice(0);
+  const useDetail = detail || selected.length === 1;
+  return selected.map((item) => useDetail ? detailMapper(item) : summaryMapper(item));
+}
+
 function searchItems(input) {
   const mode = input.mode ?? input.kind ?? 'vn';
   const q = text(input.name ?? input.query ?? input.q);
@@ -1209,15 +1244,23 @@ function searchItems(input) {
   if (!q) return { mode, query: q, results: [] };
   if (mode === 'vn' || mode === 'game') {
     const results = isVnId(q) ? data.vns.filter((vn) => vn.id === idOf(q)) : data.vns.filter((vn) => vnSearchRank(vn, q) > 0).sort(compareVnSearchResult(q));
-    return { mode: 'vn', query: q, results: results.slice(0, limit).map((vn) => slimVn(vn, { searchRank: vnSearchRank(vn, q), exactRank: vnExactSearchRank(vn, q) }, detail)) };
+    const selected = results.slice(0, limit);
+    return { mode: 'vn', query: q, results: searchOutput(selected, (vn) => vnSearchSummary(vn, { searchRank: vnSearchRank(vn, q), exactRank: vnExactSearchRank(vn, q) }), (vn) => slimVn(vn, { searchRank: vnSearchRank(vn, q), exactRank: vnExactSearchRank(vn, q) }, detail), detail) };
   }
-  if (isCharId(q)) return { mode: 'character', query: q, results: data.characters.filter((character) => character.id === idOf(q)).slice(0, limit).map((character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail)) };
+  if (isCharId(q)) {
+    const selected = data.characters.filter((character) => character.id === idOf(q)).slice(0, limit);
+    return { mode: 'character', query: q, results: searchOutput(selected, (character) => characterSearchSummary(character, { exactRank: characterExactSearchRank(character, q) }), (character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail), detail) };
+  }
   const directCharacters = data.characters.filter((character) => characterSearchMatch(character, q)).sort(compareCharacterSearchResult(q));
-  if (directCharacters.length || mode === 'characterOnly') return { mode: 'character', query: q, results: directCharacters.slice(0, limit).map((character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail)) };
+  if (directCharacters.length || mode === 'characterOnly') {
+    const selected = directCharacters.slice(0, limit);
+    return { mode: 'character', query: q, results: searchOutput(selected, (character) => characterSearchSummary(character, { exactRank: characterExactSearchRank(character, q) }), (character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail), detail) };
+  }
   const matchedVns = data.vns.filter((vn) => vnSearchRank(vn, q) > 0).sort(compareVnSearchResult(q)).slice(0, 30);
   const matchedVnRank = new Map(matchedVns.map((vn, index) => [vn.id, matchedVns.length - index]));
   const fallback = data.characters.filter((character) => character.vns.some(([id]) => matchedVnRank.has(id))).sort((a, b) => Math.max(0, ...b.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(b, false) - (Math.max(0, ...a.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(a, false)));
-  return { mode: 'character', query: q, fallbackFromVnSearch: true, results: fallback.slice(0, limit).map((character) => slimCharacter(character, {}, detail)) };
+  const selected = fallback.slice(0, limit);
+  return { mode: 'character', query: q, fallbackFromVnSearch: true, results: searchOutput(selected, (character) => characterSearchSummary(character), (character) => slimCharacter(character, {}, detail), detail) };
 }
 
 function searchMeta(input) {
