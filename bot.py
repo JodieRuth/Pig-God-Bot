@@ -1169,7 +1169,7 @@ def format_admin_users() -> str:
 def select_system_prompt(user_id: int, scope_key: str) -> str:
     reload_runtime_files()
     if is_admin_user(user_id):
-        return prompt_value("admin_system_prompt", scope_key).format(admin_users=format_admin_users())
+        return prompt_value("admin_system_prompt", scope_key).replace("{admin_users}", format_admin_users())
     return prompt_value("system_prompt", scope_key)
 
 
