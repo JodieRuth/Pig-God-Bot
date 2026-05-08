@@ -144,7 +144,17 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
 
     raw_results = data.get("results") if isinstance(data, dict) else []
     if not isinstance(raw_results, list) or not raw_results:
-        return {"ok": True, "content": f"搜索完成，但没有找到结果。\n查询: {query}\n使用实例: {used_instance}"}
+        unresponsive = data.get("unresponsive_engines") if isinstance(data, dict) else None
+        detail = ""
+        if isinstance(unresponsive, list) and unresponsive:
+            pairs = []
+            for item in unresponsive[:8]:
+                if isinstance(item, list) and len(item) >= 2:
+                    pairs.append(f"{item[0]}: {item[1]}")
+                else:
+                    pairs.append(str(item))
+            detail = "\n不可用搜索源: " + "；".join(pairs)
+        return {"ok": True, "content": f"搜索完成，但没有找到结果。多数情况下是本地 SearXNG 的上游搜索引擎超时、被封锁或代理未生效。\n查询: {query}\n使用实例: {used_instance}{detail}"}
 
     lines = [
         "搜索成功",
