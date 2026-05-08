@@ -10,6 +10,7 @@
   "/help": [
     "/帮助"
   ],
+  "/help_show": [],
   "/mcserver": [],
   "/ping": [],
   "/quote": [
@@ -20,20 +21,28 @@
   ],
   "/restart": [],
   "/roll": [],
+  "/rollback": [],
   "/rp": [],
   "/status": [],
   "/stop": [],
   "/switch": [],
   "/test": [],
+  "/test_show": [],
+  "/update": [],
   "/zhua": [
     "猪a",
     "zhua",
     "/猪a"
   ],
+  "/zhuazhu": [],
   "/zhubi": [
     "/猪币"
   ],
+  "/zhubi_clear": [],
   "/zhubi_fakuang": [
     "/发狂"
-  ]
+  ],
+  "/zhubi_idle": [],
+  "/zhubi_pvp": [],
+  "/zhubi_rank": []
 }

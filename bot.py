@@ -25,6 +25,8 @@ CACHE_DIR = CACHE_ROOT / "images"
 OUTPUT_DIR = ROOT / "outputs"
 COMMAND_DIR = ROOT / "command"
 TOOLS_DIR = ROOT / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 PLUGIN_DIR = ROOT / "plugins"
 LOG_DIR = ROOT / "logs"
 COMMAND_NICKNAME_FILE = ROOT / "command_nickname.json"
