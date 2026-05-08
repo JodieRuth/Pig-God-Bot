@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import uuid
-from pathlib import Path
 from typing import Any
 
 
@@ -44,128 +42,6 @@ def info(ctx: dict[str, Any]) -> dict[str, str]:
         "name": str(item.get("name") or "generate_image"),
         "description": str(item.get("description") or ""),
     }
-
-
-def build_image_order_note(images: list[dict[str, Any]], ctx: dict[str, Any]) -> str:
-    if not images:
-        return ""
-    lines = ["输入图片按时间顺序编号如下，图1 最早，编号越大越新："]
-    max_images = int(ctx["max_context_images"])
-    for index, record in enumerate(images[:max_images], start=1):
-        image = ctx["image_path"](record)
-        lines.append(f"图{index} = 第 {index} 张输入图片，文件名 {image.name}，发送者 {ctx['image_sender_label'](record)}")
-    lines.append("用户提到图1、图2、第一张、第二张时，必须按这个编号理解；不要自行交换图片顺序。")
-    lines.append("如果本次传入了多张参考图，而用户没有明确指定编号，请结合最近聊天上下文、用户当前请求、图片时间顺序和发送者信息，甄别真正应该用于生图的参考图片，通常优先使用与当前请求最相关、时间上最接近、由触发者本人发送或被明确点名的两张图片。")
-    lines.append("不要把无关的旧图强行混入画面；如果用户要求替换、合成或把图A内容应用到图B，要明确区分哪张是待编辑底图，哪张是参考主体/风格图。")
-    return "\n".join(lines)
-
-
-def image_api_url_for_request(has_images: bool, ctx: dict[str, Any]) -> str:
-    ctx["reload_runtime_files"]()
-    image_url = ctx["active_api_config"]("image")["url"]
-    if has_images:
-        return image_url
-    if image_url.endswith("/images/edits"):
-        return image_url.removesuffix("/images/edits") + "/images/generations"
-    return image_url
-
-
-async def _parse_image_sse(resp: aiohttp.ClientResponse, ctx: dict[str, Any]) -> str | None:
-    completed = {"image_generation.completed", "image_edit.completed"}
-    while True:
-        line = await resp.content.readline()
-        if not line:
-            break
-        line_str = line.decode("utf-8", errors="replace").strip()
-        if not line_str or not line_str.startswith("data:"):
-            continue
-        data_str = line_str[5:].strip()
-        if not data_str or data_str == "[DONE]":
-            continue
-        try:
-            event = json.loads(data_str)
-        except json.JSONDecodeError:
-            ctx["log"](f"Image SSE unparseable line: {data_str[:200]}")
-            continue
-        event_type = event.get("type", "")
-        if event_type in completed:
-            b64 = event.get("b64_json")
-            if b64:
-                ctx["log"](f"Image SSE completed event: type={event_type} size={len(b64)}")
-                return b64
-    return None
-
-
-async def call_image_api(prompt: str, context_texts: list[str], images: list[dict[str, Any]], ctx: dict[str, Any]) -> Path:
-    ctx["reload_runtime_files"]()
-    image_config = ctx["active_api_config"]("image")
-    image_url = image_config["url"]
-    image_key = image_config["key"]
-    image_model = ctx["active_model"]("image")
-    if not image_url:
-        raise RuntimeError("未配置生图接口地址")
-
-    image_paths = [ctx["image_path"](record) for record in images[:max_images]]
-    request_url = image_api_url_for_request(bool(image_paths), ctx)
-    if image_paths:
-        form = aiohttp.FormData()
-        form.add_field("model", image_model)
-        form.add_field("prompt", prompt)
-        form.add_field("stream", "True")
-        form.add_field("partial_images", "0")
-        for image in image_paths:
-            form.add_field("image", image.open("rb"), filename=image.name, content_type="image/png" if image.suffix.lower() == ".png" else "image/jpeg")
-        payload: Any = form
-    else:
-        payload = {"model": image_model, "prompt": prompt, "stream": True, "partial_images": 0}
-
-    ctx["log_json"]("Image request", {"url": request_url, "prompt": prompt, "images": [str(p) for p in image_paths], "stream": True})
-    async with aiohttp.ClientSession(headers=headers) as session:
-        if image_paths:
-            request = session.post(request_url, data=payload, timeout=60 * 30)
-        else:
-            request = session.post(request_url, json=payload, timeout=60 * 30)
-        async with request as resp:
-            content_type = resp.headers.get("content-type", "")
-            ctx["log"](f"Image response status={resp.status} content_type={content_type}")
-
-            if resp.status >= 400:
-                body = await resp.read()
-                body_text = body[:1000].decode("utf-8", errors="replace")
-                raise RuntimeError(f"HTTP {resp.status}: {ctx['sanitize_error_detail'](body_text)}")
-
-            if "event-stream" in content_type:
-                b64_json = await _parse_image_sse(resp, ctx)
-                if not b64_json:
-                    raise RuntimeError("流式响应未包含完整图片数据")
-                target = ctx["output_dir"] / f"{uuid.uuid4().hex}.png"
-                target.write_bytes(base64.b64decode(b64_json))
-                ctx["log"](f"Image saved from SSE stream: {target}")
-                return target
-
-            body = await resp.read()
-            if content_type.startswith("image/"):
-                suffix = ".png" if "png" in content_type else ".jpg"
-                target = ctx["output_dir"] / f"{uuid.uuid4().hex}{suffix}"
-                target.write_bytes(body)
-                ctx["log"](f"Image saved: {target}")
-                return target
-
-            data = json.loads(body.decode("utf-8"))
-            first = data.get("data", [{}])[0]
-            image_b64 = first.get("b64_json") or data.get("image_base64")
-            if image_b64:
-                target = ctx["output_dir"] / f"{uuid.uuid4().hex}.png"
-                target.write_bytes(base64.b64decode(image_b64))
-                ctx["log"](f"Image decoded from base64: {target}")
-                return target
-            image_url = first.get("url") or data.get("image_url")
-            if image_url:
-                ctx["log"](f"Image URL received: {image_url}")
-                path = await ctx["download_image"](session, image_url)
-                if path:
-                    return path
-            raise RuntimeError(f"生图接口没有返回可用图片字段，响应：{ctx['sanitize_error_detail'](data)}")
 
 
 def select_images(images: list[dict[str, Any]], image_indexes: list[Any]) -> list[dict[str, Any]]:
