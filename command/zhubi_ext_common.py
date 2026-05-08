@@ -199,14 +199,18 @@ def remake_multiplier(state: dict[str, Any]) -> float:
     return 1.0 + 0.15 * int(state.get("remakes", 0))
 
 
+def quality_multiplier(state: dict[str, Any]) -> float:
+    return 1.0 + 0.10 * int(state.get("quality", 0))
+
+
 def idle_multiplier(state: dict[str, Any]) -> float:
-    quality = 1.1 ** int(state.get("quality", 0))
+    quality = quality_multiplier(state)
     speed = 1.025 ** int(state.get("speed", 0))
     return quality * speed * remake_multiplier(state)
 
 
 def idle_unit_rate(state: dict[str, Any]) -> float:
-    return IDLE_BASE_RATE + int(state.get("efficiency", 0)) * 0.0001
+    return IDLE_BASE_RATE + int(state.get("efficiency", 0)) * 0.00005
 
 
 def upgrade_cost(kind: str, level: int) -> int:
@@ -241,8 +245,7 @@ def apply_idle_income_to_user(user: dict[str, Any], now: float | None = None) ->
     if total_before <= 0:
         return False, -1, "", 0.0
     gain = total_before * idle_unit_rate(state) * idle_multiplier(state) * elapsed
-    state["coins"] = truncate_decimal(float(state.get("coins", 0.0)) + gain)
-    normalize_idle_units(state)
+    change_balance(user, gain)
     total_after = idle_total_coins(state)
     reached = milestone_index(total_after)
     previous = int(state.get("last_milestone", -1))

@@ -24,9 +24,9 @@ def idle_summary(state: dict[str, Any], balance: float) -> str:
         f"MAX 储量：{int(float(state.get('max', 0.0)))}MAX",
         f"当前效率倍率：{common.idle_multiplier(state):.4f}x",
         f"每单位基础获取率：{common.idle_unit_rate(state):.6f}/秒",
-        f"idle 每秒增长速度：{common.format_amount(growth_per_sec)}",
+        f"idle 每秒产出速度：{common.format_amount(growth_per_sec)}",
         f"转生倍率：{1 + 0.15 * int(state.get('remakes', 0)):.2f}x",
-        f"quality 等级：{common.level_label(int(state.get('quality', 0)))}，下级价格：{common.format_amount(common.upgrade_cost('quality', int(state.get('quality', 0))))}",
+        f"quality 等级：{common.level_label(int(state.get('quality', 0)))}，倍率：{common.quality_multiplier(state):.4f}x，下级价格：{common.format_amount(common.upgrade_cost('quality', int(state.get('quality', 0))))}",
         f"efficiency 等级：{common.level_label(int(state.get('efficiency', 0)))}，下级价格：{common.format_amount(common.upgrade_cost('efficiency', int(state.get('efficiency', 0))))}",
         f"speed 等级：{common.level_label(int(state.get('speed', 0)))}，下级价格：{common.format_amount(common.upgrade_cost('speed', int(state.get('speed', 0))))}",
         f"转生次数：{int(state.get('remakes', 0))}",
@@ -192,6 +192,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 COMMAND = {
     "name": "/zhubi_idle",
     "usage": "/zhubi_idle [in/out <数量或nMAX+数字> | buy update quality|efficiency|speed | remake]",
-    "description": "猪币放置游戏：投入猪币每秒增长0.0001/单位，可买quality(×1.1)/efficiency(+0.0001)/speed(×1.025)升级，2147483647MAX通关后转生(×1.15)。",
+    "description": "猪币放置游戏：投入猪币每秒按idle存量产出到主钱包，基础0.0001/单位，可买quality(每级+基础值10%)/efficiency(每级+0.00005)/speed(×1.025)升级，2147483647MAX通关后转生(×1.15)。",
     "handler": handler,
 }

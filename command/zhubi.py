@@ -232,10 +232,10 @@ def idle_summary(user: dict[str, Any]) -> str:
     efficiency = max(0, int(state.get("efficiency", 0)))
     speed = max(0, int(state.get("speed", 0)))
     remakes = max(0, int(state.get("remakes", 0)))
-    quality_multiplier = 1.1 ** quality
+    quality_multiplier = 1.0 + 0.10 * quality
     speed_multiplier = 1.025 ** speed
     remake_multiplier = 1 + 0.15 * remakes
-    unit_rate = 0.0001 + efficiency * 0.0001
+    unit_rate = 0.0001 + efficiency * 0.00005
     total_multiplier = quality_multiplier * speed_multiplier * remake_multiplier
     int_base = int(max_count) * MAX_UNIT + int(coins)
     growth_per_sec = int_base * unit_rate * total_multiplier
@@ -243,7 +243,7 @@ def idle_summary(user: dict[str, Any]) -> str:
         f"当前持有：{format_balance(user['balance'])}",
         f"idle 运作中：{format_balance(total)}",
         f"idle 整数增长基数：{format_balance(int_base)}",
-        f"idle 每秒增长速度：{format_balance(growth_per_sec)}",
+        f"idle 每秒产出到主钱包：{format_balance(growth_per_sec)}",
         f"quality 等级：{quality}，倍率：{quality_multiplier:.4f}x",
         f"efficiency 等级：{efficiency}，每单位基础获取率：{unit_rate:.6f}/秒",
         f"speed 等级：{speed}，倍率：{speed_multiplier:.4f}x",
