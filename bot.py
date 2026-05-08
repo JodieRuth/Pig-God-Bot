@@ -31,6 +31,15 @@ COMMAND_NICKNAME_FILE = ROOT / "command_nickname.json"
 RUNTIME_STATE_FILE = ROOT / "runtime_state.json"
 PROMPTS_FILE = ROOT / "prompts.json"
 
+VNDB_JSON_SERVER_URL = os.getenv("VNDB_JSON_SERVER_URL", "http://127.0.0.1:8787").rstrip("/")
+VNDB_JSON_SERVER_HEALTH_URL = f"{VNDB_JSON_SERVER_URL}/health"
+VNDB_JSON_SERVER_AUTO_START = os.getenv("VNDB_JSON_SERVER_AUTO_START", "1") != "0"
+VNDB_NODE_BIN = os.getenv("VNDB_NODE_BIN", "node")
+VNDB_SERVER_SCRIPT = TOOLS_DIR / "server.mjs"
+VNDB_JSON_SERVER_START_TIMEOUT = int(os.getenv("VNDB_JSON_SERVER_START_TIMEOUT", "45"))
+VNDB_JSON_SERVER_PROCESS: asyncio.subprocess.Process | None = None
+VNDB_JSON_SERVER_LOG_TASKS: set[asyncio.Task[Any]] = set()
+
 
 def clear_cache_dir() -> None:
     if CACHE_ROOT.exists():
@@ -716,6 +725,22 @@ def append_bot_context(event: dict[str, Any], message: str | list[dict[str, Any]
     log(f"Cached bot reply for context: scope={scope_key(event)} text={text[:200]!r}")
 
 
+def add_tool_image_context(event: dict[str, Any], path: Path, text: str) -> dict[str, Any]:
+    sender_id = int(BOT_QQ) if BOT_QQ.isdigit() else 0
+    record = image_record(path, sender_id, BOT_NAME or "bot")
+    key = scope_key(event)
+    contexts[key].append({
+        "time": time.time(),
+        "user_id": sender_id,
+        "sender_name": BOT_NAME or "bot",
+        "text": text,
+        "images": [record],
+        "is_bot": True,
+    })
+    log(f"Cached tool image for context: scope={key} path={path} text={text[:200]!r}")
+    return record
+
+
 async def reply(event: dict[str, Any], message: str | list[dict[str, Any]]) -> None:
     target = f"group:{event['group_id']}" if event.get("message_type") == "group" else f"private:{event['user_id']}"
     log_json("Reply", {"target": target, "message": message})
@@ -1152,13 +1177,21 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
     tool_lookup = TOOL_EXECUTORS
 
     for _ in range(4):
+        tool_names = []
+        for tool in tools:
+            function = tool.get("function") if isinstance(tool, dict) else None
+            if isinstance(function, dict):
+                name = str(function.get("name") or "").strip()
+                if name:
+                    tool_names.append(name)
+        log(f"LLM enabled tools: {', '.join(tool_names) if tool_names else 'none'}")
         payload = {
             "model": llm_model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
         }
-        log_json("LLM request", {"url": llm_url, "payload": payload, "headers": headers})
+        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto"}, "headers": headers})
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.post(llm_url, json=payload, timeout=600) as resp:
                 text = await resp.text()
@@ -1286,6 +1319,29 @@ def find_image_generation_result(value: Any) -> str | None:
     return None
 
 
+def summarize_sse_event(event: Any) -> str:
+    if not isinstance(event, dict):
+        return sanitize_error_detail(event, 200)
+    summary: dict[str, Any] = {}
+    for key in ("type", "status", "id", "item_id", "role", "error"):
+        if key in event:
+            summary[key] = compact_payload(event[key])
+    for key in ("output", "content", "response", "data", "item"):
+        value = event.get(key)
+        if value is None:
+            continue
+        if key == "data" and isinstance(value, dict):
+            data_summary: dict[str, Any] = {}
+            for data_key in ("type", "status", "id", "item_id", "error"):
+                if data_key in value:
+                    data_summary[data_key] = compact_payload(value[data_key])
+            if data_summary:
+                summary[key] = data_summary
+        else:
+            summary[key] = compact_payload(value)
+    return sanitize_error_detail(summary, 500)
+
+
 async def iter_sse_data(resp: aiohttp.ClientResponse):
     buffer = ""
     async for chunk in resp.content.iter_chunked(65536):
@@ -1322,21 +1378,34 @@ async def iter_sse_data(resp: aiohttp.ClientResponse):
 
 async def parse_responses_image_sse(resp: aiohttp.ClientResponse) -> str:
     final_image = ""
+    recent_events: deque[str] = deque(maxlen=5)
+    error_events: deque[str] = deque(maxlen=5)
     async for data_text in iter_sse_data(resp):
         if not data_text or data_text == "[DONE]":
             continue
         try:
             event = json.loads(data_text)
         except json.JSONDecodeError:
-            log(f"Image Responses SSE unparseable event: {data_text[:300]}")
+            preview = sanitize_error_detail(data_text, 300)
+            log(f"Image Responses SSE unparseable event: {preview}")
+            recent_events.append(f"unparseable: {preview}")
             continue
         event_type = str(event.get("type") or "")
-        log(f"Image Responses SSE event: {event_type or 'unknown'}")
+        summary = summarize_sse_event(event)
+        log(f"Image Responses SSE event: {summary}")
+        recent_events.append(summary)
+        if any(keyword in event_type.lower() for keyword in ("error", "failed", "rejected", "abort")) or isinstance(event.get("error"), dict):
+            error_events.append(summary)
         image_data = find_image_generation_result(event)
         if image_data and "partial" not in event_type:
             final_image = image_data
     if not final_image:
-        raise RuntimeError("流式响应未包含最终图片数据")
+        details = ["流式响应未包含最终图片数据"]
+        if error_events:
+            details.append(f"错误事件: {' | '.join(error_events)}")
+        if recent_events:
+            details.append(f"最近事件: {' | '.join(recent_events)}")
+        raise RuntimeError("；".join(details))
     return final_image
 
 
@@ -1616,6 +1685,7 @@ def command_context() -> dict[str, Any]:
         "format_elapsed": format_elapsed,
         "reply_to_message": reply_to_message,
         "reply_segments": reply_segments,
+        "add_tool_image_context": add_tool_image_context,
         "scope_key": scope_key,
         "visible_images_for_sender": visible_images_for_sender,
         "recent_context": recent_context,
@@ -1810,7 +1880,7 @@ def load_tools() -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, s
     executors: dict[str, Any] = {}
     infos: list[dict[str, str]] = []
     for path in sorted(TOOLS_DIR.glob("*.py")):
-        if path.name.startswith("_"):
+        if path.name.startswith("_") or path.name == "animetrace_headless.py":
             continue
         try:
             tool = load_tool_module(path)
@@ -2245,29 +2315,104 @@ async def _handle_pending_update() -> None:
     pending_file.unlink(missing_ok=True)
 
 
+async def vndb_json_server_is_healthy() -> bool:
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(VNDB_JSON_SERVER_HEALTH_URL) as resp:
+                if resp.status >= 400:
+                    return False
+                data = await resp.json(content_type=None)
+                return bool(isinstance(data, dict) and data.get("ok"))
+    except Exception:
+        return False
+
+
+async def pipe_vndb_json_server_log(stream: asyncio.StreamReader | None, name: str) -> None:
+    if stream is None:
+        return
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        log(f"VNDB JSON Server {name}: {line.decode('utf-8', errors='replace').rstrip()}")
+
+
+async def start_vndb_json_server() -> None:
+    global VNDB_JSON_SERVER_PROCESS
+    if not VNDB_JSON_SERVER_AUTO_START:
+        log("VNDB JSON Server auto-start disabled")
+        return
+    if not VNDB_SERVER_SCRIPT.exists():
+        log(f"VNDB JSON Server script missing: {VNDB_SERVER_SCRIPT}")
+        return
+    if await vndb_json_server_is_healthy():
+        log(f"VNDB JSON Server already healthy: {VNDB_JSON_SERVER_URL}")
+        return
+    try:
+        VNDB_JSON_SERVER_PROCESS = await asyncio.create_subprocess_exec(
+            VNDB_NODE_BIN,
+            str(VNDB_SERVER_SCRIPT),
+            cwd=str(TOOLS_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:
+        log(f"VNDB JSON Server start failed: {exception_detail(exc)}")
+        return
+    for stream, name in ((VNDB_JSON_SERVER_PROCESS.stdout, "stdout"), (VNDB_JSON_SERVER_PROCESS.stderr, "stderr")):
+        task = asyncio.create_task(pipe_vndb_json_server_log(stream, name))
+        VNDB_JSON_SERVER_LOG_TASKS.add(task)
+        task.add_done_callback(VNDB_JSON_SERVER_LOG_TASKS.discard)
+    for _ in range(VNDB_JSON_SERVER_START_TIMEOUT):
+        if VNDB_JSON_SERVER_PROCESS.returncode is not None:
+            log(f"VNDB JSON Server exited early: {VNDB_JSON_SERVER_PROCESS.returncode}")
+            return
+        if await vndb_json_server_is_healthy():
+            log(f"VNDB JSON Server started: {VNDB_JSON_SERVER_URL}")
+            return
+        await asyncio.sleep(1)
+    log(f"VNDB JSON Server start timed out: {VNDB_JSON_SERVER_URL}")
+
+
+async def stop_vndb_json_server() -> None:
+    if VNDB_JSON_SERVER_PROCESS is None or VNDB_JSON_SERVER_PROCESS.returncode is not None:
+        return
+    VNDB_JSON_SERVER_PROCESS.terminate()
+    try:
+        await asyncio.wait_for(VNDB_JSON_SERVER_PROCESS.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        VNDB_JSON_SERVER_PROCESS.kill()
+        await VNDB_JSON_SERVER_PROCESS.wait()
+
+
 async def main() -> None:
     await _handle_pending_update()
+    await start_vndb_json_server()
     if "zhubi_idle_tick" not in jobs:
         jobs["zhubi_idle_tick"] = asyncio.create_task(zhubi_idle_tick_loop())
     log(f"Connecting to {ONEBOT_WS}")
-    while True:
-        try:
-            headers = auth_headers()
-            async with await connect_onebot_ws(headers) as ws:
-                log("Connected. Waiting for QQ events.")
-                async for raw in ws:
-                    try:
-                        event = json.loads(raw)
-                        if event.get("post_type") == "meta_event" and event.get("meta_event_type") == "heartbeat":
-                            continue
-                        log(f"WS raw event: {raw[:1000]}")
-                        task = asyncio.create_task(handle_event(event))
-                        task.add_done_callback(lambda t: log(f"Event task done: cancelled={t.cancelled()} exception={t.exception() if not t.cancelled() else None}"))
-                    except Exception as exc:
-                        log(f"event error: {exc}")
-        except Exception as exc:
-            log(f"ws disconnected: {exc}; reconnecting in 5s")
-            await asyncio.sleep(5)
+    try:
+        while True:
+            try:
+                headers = auth_headers()
+                async with await connect_onebot_ws(headers) as ws:
+                    log("Connected. Waiting for QQ events.")
+                    async for raw in ws:
+                        try:
+                            event = json.loads(raw)
+                            if event.get("post_type") == "meta_event" and event.get("meta_event_type") == "heartbeat":
+                                continue
+                            log(f"WS raw event: {raw[:1000]}")
+                            task = asyncio.create_task(handle_event(event))
+                            task.add_done_callback(lambda t: log(f"Event task done: cancelled={t.cancelled()} exception={t.exception() if not t.cancelled() else None}"))
+                        except Exception as exc:
+                            log(f"event error: {exc}")
+            except Exception as exc:
+                log(f"ws disconnected: {exc}; reconnecting in 5s")
+                await asyncio.sleep(5)
+    finally:
+        await stop_vndb_json_server()
 
 
 if __name__ == "__main__":

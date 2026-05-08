@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import zipfile
 from datetime import datetime
@@ -27,13 +28,13 @@ UPDATE_MIRROR_PREFIXES = [
 ]
 PRESERVE_FILES = {".env", "runtime_state.json", ".pending_update.json"}
 ALLOWED_JSON_FILES = {
-    "command_nickname.json"
+    "command_nickname.json",
     "command/haochi/drinks.json",
     "command/haochi/foods.json",
 }
 C_SHARP_ROOT = "tools/browser_automation_host"
 C_SHARP_ALLOWED_SUFFIXES = {".cs", ".csproj"}
-ROOT_ALLOWED_FILES = {"requirements.txt"}
+ROOT_ALLOWED_FILES = {"requirements.txt", "tools/server.mjs"}
 ROLLBACK_DIR_NAME = "rollback"
 PENDING_UPDATE_FILE = ".pending_update.json"
 STARTUP_MAX_WAIT = 45
@@ -156,8 +157,6 @@ def _install_requirements(root: Path) -> str:
     if not req.exists():
         return ""
     try:
-        import subprocess
-
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-r", str(req)],
             capture_output=False,
@@ -169,6 +168,30 @@ def _install_requirements(root: Path) -> str:
         return ""
     except subprocess.TimeoutExpired:
         return "pip install 超时"
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _update_vndb_data(root: Path) -> str:
+    script = root / "tools" / "server.mjs"
+    if not script.exists():
+        return "tools/server.mjs 不存在"
+    try:
+        result = subprocess.run(
+            [os.getenv("VNDB_NODE_BIN", "node"), str(script), "--update"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=str(root / "tools"),
+            encoding="utf-8",
+            errors="replace",
+        )
+        output = " ".join((result.stdout + "\n" + result.stderr).split())
+        if result.returncode != 0:
+            return f"node server.mjs --update 返回 exit code {result.returncode}: {_short_error(output)}"
+        return ""
+    except subprocess.TimeoutExpired:
+        return "node server.mjs --update 超时"
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
 
@@ -284,6 +307,13 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
     pip_error = _install_requirements(bot_root)
 
+    await ctx["reply"](event, "正在使用 tools/server.mjs 更新并解压 VNDB 数据...")
+    vndb_error = _update_vndb_data(bot_root)
+    if vndb_error:
+        await ctx["reply"](event, f"VNDB 数据更新失败，将继续重启 bot：{vndb_error}")
+    else:
+        await ctx["reply"](event, "VNDB 数据已更新到 tools/data。")
+
     pending = {
         "rollback_timestamp": rollback_timestamp,
         "event": {
@@ -319,6 +349,8 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             log(f"Update finished with copy warnings: {detail}")
         if pip_error:
             log(f"Update finished with pip warning: {pip_error}")
+        if vndb_error:
+            log(f"Update finished with VNDB warning: {vndb_error}")
         os._exit(0)
 
     if proc.returncode is not None:
