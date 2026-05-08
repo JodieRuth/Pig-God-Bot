@@ -56,7 +56,8 @@ SEARXNG_START_TIMEOUT = int(os.getenv("SEARXNG_START_TIMEOUT", "60"))
 SEARXNG_HOST = os.getenv("SEARXNG_HOST", "0.0.0.0")
 SEARXNG_PORT = int(os.getenv("SEARXNG_PORT", "8888"))
 SEARXNG_WORKERS = int(os.getenv("SEARXNG_WORKERS", "1"))
-SEARXNG_THREADS = int(os.getenv("SEARXNG_THREADS", "8"))
+SEARXNG_RUNTIME_THREADS = int(os.getenv("SEARXNG_RUNTIME_THREADS", "1"))
+SEARXNG_BLOCKING_THREADS = int(os.getenv("SEARXNG_BLOCKING_THREADS", os.getenv("SEARXNG_THREADS", "8")))
 SEARXNG_BACKPRESSURE = int(os.getenv("SEARXNG_BACKPRESSURE", "16"))
 SEARXNG_USE_SYSTEM_PROXY = os.getenv("SEARXNG_USE_SYSTEM_PROXY", "1") != "0"
 SEARXNG_PROCESS: asyncio.subprocess.Process | None = None
@@ -2727,7 +2728,8 @@ async def start_searxng_server() -> tuple[bool, str]:
         log(f"SearXNG proxy enabled: {proxy}")
     log(
         f"Starting SearXNG with settings={SEARXNG_SETTINGS_PATH}, host={SEARXNG_HOST}, port={SEARXNG_PORT}, "
-        f"workers={SEARXNG_WORKERS}, threads={SEARXNG_THREADS}, backpressure={SEARXNG_BACKPRESSURE}"
+        f"workers={SEARXNG_WORKERS}, runtime_threads={SEARXNG_RUNTIME_THREADS}, "
+        f"blocking_threads={SEARXNG_BLOCKING_THREADS}, backpressure={SEARXNG_BACKPRESSURE}"
     )
     try:
         SEARXNG_PROCESS = await asyncio.create_subprocess_exec(
@@ -2736,7 +2738,8 @@ async def start_searxng_server() -> tuple[bool, str]:
             "--host", SEARXNG_HOST,
             "--port", str(SEARXNG_PORT),
             "--workers", str(SEARXNG_WORKERS),
-            "--threads", str(SEARXNG_THREADS),
+            "--runtime-threads", str(SEARXNG_RUNTIME_THREADS),
+            "--blocking-threads", str(SEARXNG_BLOCKING_THREADS),
             "--backpressure", str(SEARXNG_BACKPRESSURE),
             "searx.webapp:app",
             cwd=str(SEARXNG_RUNTIME_DIR),
@@ -2753,27 +2756,15 @@ async def start_searxng_server() -> tuple[bool, str]:
         SEARXNG_LOG_TASKS.add(task)
         task.add_done_callback(SEARXNG_LOG_TASKS.discard)
     for _ in range(SEARXNG_START_TIMEOUT):
+        if SEARXNG_PROCESS.returncode is not None:
+            log(f"SearXNG exited early: {SEARXNG_PROCESS.returncode}")
+            return False, f"进程提前退出：{SEARXNG_PROCESS.returncode}"
         if await searxng_server_is_healthy():
             await log_searxng_runtime_config(env)
             await log_searxng_httpx_probe(env)
             await log_searxng_search_smoke()
-            if SEARXNG_PROCESS.returncode is None:
-                log(f"SearXNG started: {SEARXNG_URL}")
-                return True, f"已启动：{SEARXNG_URL}"
-            else:
-                log(f"SearXNG available after spawned process exited: {SEARXNG_URL}")
-                return True, f"已可用：{SEARXNG_URL}"
-        if SEARXNG_PROCESS.returncode is not None:
-            log(f"SearXNG exited early: {SEARXNG_PROCESS.returncode}; rechecking existing server")
-            for _ in range(5):
-                if await searxng_server_is_healthy():
-                    await log_searxng_runtime_config(env)
-                    await log_searxng_httpx_probe(env)
-                    await log_searxng_search_smoke()
-                    log(f"SearXNG already available: {SEARXNG_URL}")
-                    return True, f"已可用：{SEARXNG_URL}"
-                await asyncio.sleep(1)
-            return False, f"进程提前退出：{SEARXNG_PROCESS.returncode}"
+            log(f"SearXNG started: {SEARXNG_URL}")
+            return True, f"已启动：{SEARXNG_URL}"
         await asyncio.sleep(1)
     log(f"SearXNG start timed out: {SEARXNG_URL}")
     return False, f"启动超时：{SEARXNG_URL}"
