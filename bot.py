@@ -417,6 +417,10 @@ def prompt_value(key: str, scope_key: str = "") -> str:
 
 contexts: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=MAX_CONTEXT_MESSAGES))
 jobs: dict[str, asyncio.Task] = {}
+IMAGE_JOB_CONCURRENCY = 2
+image_queue: deque[dict[str, Any]] = deque()
+active_image_jobs: dict[str, dict[str, Any]] = {}
+image_jobs_by_user: dict[int, str] = {}
 bot_state: dict[str, Any] = {"stopped": False}
 group_member_name_cache: dict[tuple[int, int], str] = {}
 last_images_by_sender: dict[tuple[str, int], deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=MAX_CONTEXT_IMAGES))
@@ -1409,7 +1413,7 @@ def select_tool_images(images: list[dict[str, Any]], image_indexes: list[Any]) -
     return selected
 
 
-async def image_job(event: dict[str, Any], job_id: str, prompt: str, context_texts: list[str], images: list[dict[str, Any]]) -> None:
+async def run_image_job(event: dict[str, Any], job_id: str, prompt: str, context_texts: list[str], images: list[dict[str, Any]]) -> None:
     start = time.monotonic()
     log(f"Image job started: {job_id} prompt={prompt!r} images={[image_path(record).name for record in images]}")
     try:
@@ -1430,8 +1434,99 @@ async def image_job(event: dict[str, Any], job_id: str, prompt: str, context_tex
         detail = exception_detail(exc)
         log(f"Image job failed: {job_id} elapsed={elapsed} error={detail}")
         await reply(event, f"任务 {job_id} 失败，用时 {elapsed}：{detail}")
-    finally:
-        jobs.pop(job_id, None)
+
+
+def queued_image_position(job_id: str) -> int:
+    for index, item in enumerate(image_queue, start=1):
+        if item.get("job_id") == job_id:
+            return index
+    return 0
+
+
+def image_user_pending_job(user_id: int) -> str:
+    job_id = image_jobs_by_user.get(user_id, "")
+    if not job_id:
+        return ""
+    if job_id in active_image_jobs or queued_image_position(job_id):
+        return job_id
+    image_jobs_by_user.pop(user_id, None)
+    return ""
+
+
+def queued_image_job_count() -> int:
+    return len(image_queue)
+
+
+def start_queued_image_jobs() -> None:
+    while len(active_image_jobs) < IMAGE_JOB_CONCURRENCY and image_queue:
+        item = image_queue.popleft()
+        job_id = str(item["job_id"])
+        active_image_jobs[job_id] = item
+        task = asyncio.create_task(run_image_job(item["event"], job_id, item["prompt"], item.get("context_texts", []), item.get("images", [])))
+        jobs[job_id] = task
+        task.add_done_callback(lambda t, jid=job_id: image_task_done(jid, t))
+        log(f"Image job dequeued: {job_id} active={len(active_image_jobs)} queued={len(image_queue)}")
+
+
+def image_task_done(job_id: str, task: asyncio.Task) -> None:
+    item = active_image_jobs.pop(job_id, None)
+    if item:
+        image_jobs_by_user.pop(int(item.get("user_id", 0)), None)
+    jobs.pop(job_id, None)
+    try:
+        exception = task.exception() if not task.cancelled() else None
+    except asyncio.CancelledError:
+        exception = None
+    log(f"Image task done: {job_id} cancelled={task.cancelled()} exception={exception} active={len(active_image_jobs)} queued={len(image_queue)}")
+    start_queued_image_jobs()
+
+
+async def enqueue_image_job(event: dict[str, Any], job_id: str, prompt: str, context_texts: list[str], images: list[dict[str, Any]]) -> dict[str, Any]:
+    user_id = int(event.get("user_id", 0))
+    existing_job_id = image_user_pending_job(user_id)
+    if existing_job_id:
+        position = queued_image_position(existing_job_id)
+        state = f"排队中，前面还有 {position - 1} 个生图任务" if position else "正在生成中"
+        return {"ok": False, "content": f"你已经有一个生图任务 {existing_job_id} {state}，完成或取消后才能提交新的生图请求。"}
+
+    item = {
+        "event": event,
+        "job_id": job_id,
+        "user_id": user_id,
+        "prompt": prompt,
+        "context_texts": context_texts,
+        "images": images,
+    }
+    image_jobs_by_user[user_id] = job_id
+    if len(active_image_jobs) < IMAGE_JOB_CONCURRENCY:
+        active_image_jobs[job_id] = item
+        task = asyncio.create_task(run_image_job(event, job_id, prompt, context_texts, images))
+        jobs[job_id] = task
+        task.add_done_callback(lambda t, jid=job_id: image_task_done(jid, t))
+        log(f"Image job started immediately: {job_id} active={len(active_image_jobs)} queued={len(image_queue)}")
+        return {"ok": True, "queued": False, "position": 0, "active": len(active_image_jobs), "queued_count": len(image_queue)}
+
+    image_queue.append(item)
+    log(f"Image job queued: {job_id} active={len(active_image_jobs)} queued={len(image_queue)}")
+    return {"ok": True, "queued": True, "position": len(image_queue), "active": len(active_image_jobs), "queued_count": len(image_queue)}
+
+
+async def cancel_image_job(job_id: str) -> bool:
+    for item in list(image_queue):
+        if item.get("job_id") == job_id:
+            image_queue.remove(item)
+            image_jobs_by_user.pop(int(item.get("user_id", 0)), None)
+            log(f"Queued image job cancelled: {job_id} active={len(active_image_jobs)} queued={len(image_queue)}")
+            return True
+    task = jobs.get(job_id)
+    if not task:
+        return False
+    task.cancel()
+    return True
+
+
+async def image_job(event: dict[str, Any], job_id: str, prompt: str, context_texts: list[str], images: list[dict[str, Any]]) -> None:
+    await run_image_job(event, job_id, prompt, context_texts, images)
 
 
 def command_help_text() -> str:
@@ -1512,6 +1607,12 @@ def command_context() -> dict[str, Any]:
         "original_stderr": ORIGINAL_STDERR,
         "create_task": asyncio.create_task,
         "image_job": image_job,
+        "enqueue_image_job": enqueue_image_job,
+        "cancel_image_job": cancel_image_job,
+        "image_queue": image_queue,
+        "active_image_jobs": active_image_jobs,
+        "image_jobs_by_user": image_jobs_by_user,
+        "queued_image_job_count": queued_image_job_count,
         "format_elapsed": format_elapsed,
         "reply_to_message": reply_to_message,
         "reply_segments": reply_segments,

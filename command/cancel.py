@@ -5,12 +5,14 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if not ctx["is_admin_event"](event):
         await ctx["reply"](event, "你没有权限使用控制指令。")
         return
-    task = ctx["jobs"].get(arg.strip())
-    if not task:
+    job_id = arg.strip()
+    if not job_id:
+        await ctx["reply"](event, "用法：/cancel <任务ID>")
+        return
+    if not await ctx["cancel_image_job"](job_id):
         await ctx["reply"](event, "没有找到这个任务。")
         return
-    task.cancel()
-    await ctx["reply"](event, f"已请求取消任务 {arg.strip()}。")
+    await ctx["reply"](event, f"已请求取消任务 {job_id}。")
 
 
 COMMAND = {

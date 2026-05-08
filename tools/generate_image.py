@@ -68,10 +68,14 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
     job_id = uuid.uuid4().hex[:8]
     notice = str(args.get("notice") or "收到，图像任务已开始。").strip() or "收到，图像任务已开始。"
     try:
-        await ctx["reply"](runtime["event"], f"{notice}\n任务 ID：{job_id}")
-        task = ctx["create_task"](ctx["image_job"](runtime["event"], job_id, prompt, runtime.get("context_texts", []), images))
-        ctx["jobs"][job_id] = task
-        task.add_done_callback(lambda t, jid=job_id: ctx["log"](f"Background task done: {jid} cancelled={t.cancelled()} exception={t.exception() if not t.cancelled() else None}"))
+        queue_result = await ctx["enqueue_image_job"](runtime["event"], job_id, prompt, runtime.get("context_texts", []), images)
+        if not queue_result.get("ok"):
+            return {"ok": False, "content": str(queue_result.get("content") or "生图任务启动失败。")}
+        if queue_result.get("queued"):
+            position = int(queue_result.get("position") or 0)
+            await ctx["reply"](runtime["event"], f"{notice}\n任务 ID：{job_id}\n当前同时最多生成 2 张，你的任务已进入队列，当前排第 {position} 位。")
+        else:
+            await ctx["reply"](runtime["event"], f"{notice}\n任务 ID：{job_id}\n当前正在生成。")
     except Exception as exc:
         return {"ok": False, "content": f"生图任务启动失败：{ctx['exception_detail'](exc)}"}
     return {
