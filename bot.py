@@ -1179,7 +1179,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
     tool_lookup = TOOL_EXECUTORS
     terminal_tool_names = {"generate_image", "reply_to_context_message"}
 
-    for _ in range(4):
+    for _ in range(15):
         tool_names = []
         for tool in tools:
             function = tool.get("function") if isinstance(tool, dict) else None
