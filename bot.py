@@ -1183,6 +1183,9 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                                 result = {"ok": False, "content": f"工具调用失败：{exception_detail(exc)}"}
                         tool_result_text = str(result.get("content") or "")
                         tool_call_id = str(tool_call.get("id") or uuid.uuid4().hex)
+                        if result.get("answered") and result.get("ok"):
+                            log_json("Tool execution result", {"tool": tool_name, "result": result})
+                            return {"type": "answered_by_tool", "text": ""}
                         if tool_result_text:
                             if tool_name == "reply_to_context_message" and result.get("ok"):
                                 return {"type": "answered_by_tool", "text": ""}

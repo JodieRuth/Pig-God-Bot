@@ -29,7 +29,7 @@ def definition(ctx: dict[str, Any]) -> dict[str, Any]:
                     },
                     "notice": {
                         "type": "string",
-                        "description": "发给 QQ 用户的简短开始提示，例如：已开始处理这张图，完成后会带用时回复。",
+                        "description": "使用本工具时本轮对话需要发给 QQ 用户的完整回复消息。工具启动成功后程序会立即发送该消息并附加任务 ID，使用自然语言回复即可，就像平时回复那样，但需要告知用户任务已开始需要等待。",
                     },
                 },
                 "required": ["prompt"],
@@ -198,11 +198,9 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
         task.add_done_callback(lambda t, jid=job_id: ctx["log"](f"Background task done: {jid} cancelled={t.cancelled()} exception={t.exception() if not t.cancelled() else None}"))
     except Exception as exc:
         return {"ok": False, "content": f"生图任务启动失败：{ctx['exception_detail'](exc)}"}
-    image_names = [ctx["image_path"](record).name for record in images]
-    detail = f"，参考图片：{', '.join(image_names)}" if image_names else "，无参考图片"
     return {
         "ok": True,
-        "content": f"生图后台任务已启动，任务 ID：{job_id}{detail}。工具只负责启动任务，不等待完整图片生成；图片完成或失败后会由 bot 在群聊中另行回复。",
+        "answered": True,
         "job_id": job_id,
         "notice": notice,
     }
