@@ -1282,22 +1282,49 @@ def find_image_generation_result(value: Any) -> str | None:
     return None
 
 
+async def iter_sse_data(resp: aiohttp.ClientResponse):
+    buffer = ""
+    async for chunk in resp.content.iter_chunked(65536):
+        if not chunk:
+            continue
+        buffer += chunk.decode("utf-8", errors="replace")
+        while True:
+            separator_index = buffer.find("\n\n")
+            separator_length = 2
+            crlf_index = buffer.find("\r\n\r\n")
+            if crlf_index != -1 and (separator_index == -1 or crlf_index < separator_index):
+                separator_index = crlf_index
+                separator_length = 4
+            if separator_index == -1:
+                break
+            raw_event = buffer[:separator_index]
+            buffer = buffer[separator_index + separator_length:]
+            data_lines = []
+            for raw_line in raw_event.splitlines():
+                line = raw_line.strip()
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+            if data_lines:
+                yield "\n".join(data_lines).strip()
+    if buffer.strip():
+        data_lines = []
+        for raw_line in buffer.splitlines():
+            line = raw_line.strip()
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if data_lines:
+            yield "\n".join(data_lines).strip()
+
+
 async def parse_responses_image_sse(resp: aiohttp.ClientResponse) -> str:
     final_image = ""
-    while True:
-        line = await resp.content.readline()
-        if not line:
-            break
-        line_text = line.decode("utf-8", errors="replace").strip()
-        if not line_text or not line_text.startswith("data:"):
-            continue
-        data_text = line_text[5:].strip()
+    async for data_text in iter_sse_data(resp):
         if not data_text or data_text == "[DONE]":
             continue
         try:
             event = json.loads(data_text)
         except json.JSONDecodeError:
-            log(f"Image Responses SSE unparseable line: {data_text[:300]}")
+            log(f"Image Responses SSE unparseable event: {data_text[:300]}")
             continue
         event_type = str(event.get("type") or "")
         log(f"Image Responses SSE event: {event_type or 'unknown'}")
