@@ -1294,6 +1294,23 @@ async function downloadImageToCache(url, key) {
   return { url, localPath, cached: false, bytes: buffer.length };
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sameJsonValue(left, right) {
+  return stableJson(left) === stableJson(right);
+}
+
+function omitDuplicateLocalFields(local, remote) {
+  if (!local || typeof local !== 'object' || Array.isArray(local) || !remote || typeof remote !== 'object' || Array.isArray(remote)) return local;
+  return Object.fromEntries(Object.entries(local).filter(([key, value]) => !(Object.hasOwn(remote, key) && sameJsonValue(value, remote[key]))));
+}
+
 async function vndbApiDetail(input) {
   const target = pickBestLocalTarget(input);
   const downloadImage = Boolean(input.downloadImage ?? input.image ?? true);
@@ -1308,6 +1325,7 @@ async function vndbApiDetail(input) {
     results: 1
   });
   const remote = api?.results?.[0] ?? null;
+  const local = omitDuplicateLocalFields(target.local, remote);
   const apiImageUrl = remote?.image?.url ?? null;
   const imageUrl = apiImageUrl ?? localImageUrl;
   let imageCache = null;
@@ -1321,7 +1339,7 @@ async function vndbApiDetail(input) {
   }
   return {
     target: { type: target.type, id: target.id, vndbid: target.type === 'vn' ? `v${target.id}` : `c${target.id}` },
-    local: target.local,
+    local,
     vndbApi: remote,
     image: imageUrl ? { url: imageUrl, cache: imageCache, cacheError: imageCacheError } : null
   };

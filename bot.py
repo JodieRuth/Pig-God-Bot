@@ -1177,6 +1177,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         "system_prompt": system_prompt,
     }
     tool_lookup = TOOL_EXECUTORS
+    terminal_tool_names = {"generate_image", "reply_to_context_message"}
 
     for _ in range(4):
         tool_names = []
@@ -1205,30 +1206,37 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                 tool_calls = message.get("tool_calls") or []
                 if tool_calls:
                     log_json("LLM tool calls", tool_calls)
-                    assistant_message = {"role": "assistant", "content": message.get("content"), "tool_calls": tool_calls}
+                    assistant_message = {"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls}
                     messages.append(assistant_message)
                     for tool_call in tool_calls:
                         function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
                         tool_name = str(function.get("name") or "").strip().lower()
                         raw_args = function.get("arguments") or "{}"
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                        executor = tool_lookup.get(tool_name)
-                        if not executor:
-                            result = {"ok": False, "content": f"工具调用失败：未找到工具 {tool_name or 'unknown'}"}
+                        try:
+                            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        except json.JSONDecodeError as exc:
+                            args = {}
+                            result = {"ok": False, "content": f"工具调用失败：参数不是有效 JSON：{sanitize_error_detail(str(exc))}"}
                         else:
-                            try:
-                                result = await executor(args if isinstance(args, dict) else {}, tool_runtime, command_context())
-                            except Exception as exc:
-                                result = {"ok": False, "content": f"工具调用失败：{exception_detail(exc)}"}
+                            executor = tool_lookup.get(tool_name)
+                            if not executor:
+                                result = {"ok": False, "content": f"工具调用失败：未找到工具 {tool_name or 'unknown'}"}
+                            else:
+                                try:
+                                    result = await executor(args if isinstance(args, dict) else {}, tool_runtime, command_context())
+                                except Exception as exc:
+                                    result = {"ok": False, "content": f"工具调用失败：{exception_detail(exc)}"}
                         tool_result_text = str(result.get("content") or "")
+                        if not tool_result_text:
+                            tool_result_text = json.dumps({"ok": bool(result.get("ok")), "error": result.get("error") or "工具没有返回内容"}, ensure_ascii=False)
                         tool_call_id = str(tool_call.get("id") or uuid.uuid4().hex)
                         if result.get("answered") and result.get("ok"):
                             log_json("Tool execution result", {"tool": tool_name, "result": result})
                             return {"type": "answered_by_tool", "text": ""}
-                        if tool_result_text:
-                            if tool_name == "reply_to_context_message" and result.get("ok"):
-                                return {"type": "answered_by_tool", "text": ""}
-                            messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
+                        if tool_name in terminal_tool_names and result.get("ok"):
+                            log_json("Tool execution result", {"tool": tool_name, "result": result})
+                            return {"type": "answered_by_tool", "text": ""}
+                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
                         log_json("Tool execution result", {"tool": tool_name, "result": result})
                     continue
                 reply_text = message.get("content") or ""
