@@ -346,11 +346,11 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if startup_ok:
         if copy_errors:
             detail = "；".join(copy_errors[:3])
-            log(f"Update finished with copy warnings: {detail}")
+            ctx["log"](f"Update finished with copy warnings: {detail}")
         if pip_error:
-            log(f"Update finished with pip warning: {pip_error}")
+            ctx["log"](f"Update finished with pip warning: {pip_error}")
         if vndb_error:
-            log(f"Update finished with VNDB warning: {vndb_error}")
+            ctx["log"](f"Update finished with VNDB warning: {vndb_error}")
         os._exit(0)
 
     if proc.returncode is not None:

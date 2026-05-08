@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
@@ -13,6 +14,7 @@ const DATA_FILE = join(DATA_DIR, 'vndb-data.json');
 const GZIP_FILE = join(DATA_DIR, 'vndb-data.json.gz');
 const MANIFEST_FILE = join(DATA_DIR, 'manifest.json');
 const REMOTE_MANIFEST_URL = process.env.VNDB_PROFILE_MANIFEST_URL || 'https://raw.githubusercontent.com/JodieRuth/VNDB-Profile-Search/data-latest/public/data/manifest.json';
+const GITHUB_MIRROR_PREFIXES = (process.env.GITHUB_MIRROR_PREFIXES || 'https://gh.llkk.cc/,https://ghproxy.net/,https://gh-proxy.com/').split(',').map((item) => item.trim()).filter(Boolean);
 const VNDB_API_BASE = process.env.VNDB_API_BASE || 'https://api.vndb.org/kana';
 const PORT = Number(process.env.PORT || process.env.VNDB_JSON_SERVER_PORT || 8787);
 const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
@@ -78,32 +80,98 @@ async function withRetries(label, task, attempts = 3) {
   throw new Error(`${label} failed after ${attempts} attempts: ${lastError?.message || lastError}`);
 }
 
-async function fetchJson(url) {
-  return withRetries(`Fetch JSON ${url}`, async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
-    try {
-      const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
-    } finally {
-      clearTimeout(timeout);
-    }
+function githubMirrorUrl(url, prefix) {
+  if (!/^https?:\/\//i.test(url)) return url;
+  if (!/(^https?:\/\/raw\.githubusercontent\.com\/|^https?:\/\/github\.com\/)/i.test(url)) return url;
+  return prefix + url;
+}
+
+function fetchPlan(url) {
+  const plan = [{ label: 'system proxy', url, proxy: true }];
+  for (const prefix of GITHUB_MIRROR_PREFIXES) plan.push({ label: `mirror ${prefix.replace(/\/$/, '')}`, url: githubMirrorUrl(url, prefix), proxy: false });
+  plan.push({ label: 'direct', url, proxy: false });
+  return plan;
+}
+
+function proxyEnv() {
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '';
+  if (!proxy) return null;
+  const env = { ...process.env };
+  env.HTTPS_PROXY = proxy;
+  env.HTTP_PROXY = proxy;
+  env.https_proxy = proxy;
+  env.http_proxy = proxy;
+  return env;
+}
+
+function systemProxyUnavailableError() {
+  return new Error('system proxy unavailable: HTTPS_PROXY/HTTP_PROXY is not configured');
+}
+
+function fetchByCurl(url, options, timeoutMs) {
+  const env = proxyEnv();
+  if (!env) return Promise.reject(systemProxyUnavailableError());
+  return new Promise((resolve, reject) => {
+    const args = ['-L', '--fail', '--silent', '--show-error', '--max-time', String(Math.ceil(timeoutMs / 1000))];
+    if (options?.method === 'POST') args.push('-X', 'POST');
+    for (const [key, value] of Object.entries(options?.headers ?? {})) args.push('-H', `${key}: ${value}`);
+    if (options?.body != null) args.push('--data-binary', String(options.body));
+    args.push(url);
+    const child = spawn('curl', args, { env, windowsHide: true });
+    const chunks = [];
+    const errors = [];
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`curl timeout after ${timeoutMs}ms`));
+    }, timeoutMs + 1000);
+    child.stdout.on('data', (chunk) => chunks.push(chunk));
+    child.stderr.on('data', (chunk) => errors.push(chunk));
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(Buffer.concat(chunks));
+      else reject(new Error(`curl exit ${code}: ${Buffer.concat(errors).toString('utf8').trim()}`));
+    });
   });
 }
 
-async function fetchBytes(url, options = {}) {
-  return withRetries(`Fetch bytes ${url}`, async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 300000);
+async function fetchBuffer(url, options = {}, timeoutMs = 60000, useSystemProxy = false) {
+  if (useSystemProxy) return fetchByCurl(url, options, timeoutMs);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { cache: 'no-store', signal: controller.signal, ...options });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return Buffer.from(await response.arrayBuffer());
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchWithFallback(label, url, options = {}, timeoutMs = 60000) {
+  const failures = [];
+  for (const item of fetchPlan(url)) {
     try {
-      const response = await fetch(url, { cache: 'no-store', signal: controller.signal, ...options });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return Buffer.from(await response.arrayBuffer());
-    } finally {
-      clearTimeout(timeout);
+      const buffer = await withRetries(`${label} ${item.label} ${item.url}`, () => fetchBuffer(item.url, options, timeoutMs, item.proxy));
+      if (item.url !== url || item.proxy) console.error(new Date().toISOString(), `${label} downloaded via ${item.label}`);
+      return buffer;
+    } catch (error) {
+      failures.push(`${item.label}: ${String(error?.message || error)}`);
     }
-  });
+  }
+  throw new Error(`${label} failed: ${failures.join(' | ')}`);
+}
+
+async function fetchJson(url) {
+  const buffer = await fetchWithFallback(`Fetch JSON ${url}`, url, {}, 60000);
+  return JSON.parse(buffer.toString('utf8'));
+}
+
+async function fetchBytes(url, options = {}) {
+  return fetchWithFallback(`Fetch bytes ${url}`, url, options, 300000);
 }
 
 async function postJson(url, payload) {
