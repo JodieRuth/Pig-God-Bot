@@ -21,7 +21,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         ctx["bot_state"]["stopped"] = False
         await ctx["reply"](event, "正在重启 bot 进程。")
         await asyncio.sleep(0.5)
-        await ctx["reboot_process"]()
+        await ctx["reboot_process"](event)
         return
     ctx["bot_state"]["stopped"] = True
     await ctx["reply"](event, "已停止响应。使用 /restart 恢复。")
