@@ -53,6 +53,11 @@ SEARXNG_PYTHON_BIN = Path(os.getenv("SEARXNG_PYTHON_BIN", str(SEARXNG_RUNTIME_DI
 SEARXNG_GRANIAN_BIN = Path(os.getenv("SEARXNG_GRANIAN_BIN", str(SEARXNG_RUNTIME_DIR / ".venv" / "Scripts" / "granian.exe"))).resolve()
 SEARXNG_SETTINGS_PATH = Path(os.getenv("SEARXNG_SETTINGS_PATH", str(SEARXNG_RUNTIME_DIR / "settings-local.yml"))).resolve()
 SEARXNG_START_TIMEOUT = int(os.getenv("SEARXNG_START_TIMEOUT", "60"))
+SEARXNG_HOST = os.getenv("SEARXNG_HOST", "0.0.0.0")
+SEARXNG_PORT = int(os.getenv("SEARXNG_PORT", "8888"))
+SEARXNG_WORKERS = int(os.getenv("SEARXNG_WORKERS", "1"))
+SEARXNG_THREADS = int(os.getenv("SEARXNG_THREADS", "8"))
+SEARXNG_BACKPRESSURE = int(os.getenv("SEARXNG_BACKPRESSURE", "16"))
 SEARXNG_USE_SYSTEM_PROXY = os.getenv("SEARXNG_USE_SYSTEM_PROXY", "1") != "0"
 SEARXNG_PROCESS: asyncio.subprocess.Process | None = None
 SEARXNG_LOG_TASKS: set[asyncio.Task[Any]] = set()
@@ -1707,8 +1712,7 @@ async def windows_kill_processes_on_ports(ports: list[int]) -> int:
     return int(match.group(1)) if match else 0
 
 
-async def force_reset_managed_services() -> None:
-    await stop_vndb_json_server()
+async def force_reset_searxng_server() -> None:
     await stop_searxng_server()
     if os.name == "nt":
         searxng_patterns = [
@@ -1717,13 +1721,21 @@ async def force_reset_managed_services() -> None:
             "searx.webapp:app",
             "start-searxng",
         ]
+        await windows_kill_processes_by_commandline(searxng_patterns)
+        await windows_kill_processes_on_ports([SEARXNG_PORT])
+        await asyncio.sleep(1)
+
+
+async def force_reset_managed_services() -> None:
+    await stop_vndb_json_server()
+    await force_reset_searxng_server()
+    if os.name == "nt":
         vndb_patterns = [
             str(VNDB_SERVER_SCRIPT),
             "server.mjs",
         ]
-        await windows_kill_processes_by_commandline(searxng_patterns)
         await windows_kill_processes_by_commandline(vndb_patterns)
-        await windows_kill_processes_on_ports([8888, 8787])
+        await windows_kill_processes_on_ports([8787])
         await asyncio.sleep(1)
 
 
@@ -2586,10 +2598,7 @@ async def start_searxng_server() -> tuple[bool, str]:
     if not SEARXNG_AUTO_START:
         log("SearXNG auto-start disabled")
         return True, "自动启动已关闭"
-    if await searxng_server_is_healthy():
-        detail = f"已可用：{SEARXNG_URL}"
-        log(f"SearXNG already healthy: {SEARXNG_URL}")
-        return True, detail
+    await force_reset_searxng_server()
     install_error = await install_searxng_dependencies()
     if install_error:
         log(f"SearXNG dependency check failed: {install_error}")
@@ -2603,12 +2612,19 @@ async def start_searxng_server() -> tuple[bool, str]:
     proxy = apply_proxy_env(env)
     if proxy:
         log(f"SearXNG proxy enabled: {proxy}")
+    log(
+        f"Starting SearXNG with settings={SEARXNG_SETTINGS_PATH}, host={SEARXNG_HOST}, port={SEARXNG_PORT}, "
+        f"workers={SEARXNG_WORKERS}, threads={SEARXNG_THREADS}, backpressure={SEARXNG_BACKPRESSURE}"
+    )
     try:
         SEARXNG_PROCESS = await asyncio.create_subprocess_exec(
             str(SEARXNG_GRANIAN_BIN),
             "--interface", "wsgi",
-            "--host", "0.0.0.0",
-            "--port", "8888",
+            "--host", SEARXNG_HOST,
+            "--port", str(SEARXNG_PORT),
+            "--workers", str(SEARXNG_WORKERS),
+            "--threads", str(SEARXNG_THREADS),
+            "--backpressure", str(SEARXNG_BACKPRESSURE),
             "searx.webapp:app",
             cwd=str(SEARXNG_RUNTIME_DIR),
             env=env,
