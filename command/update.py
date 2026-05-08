@@ -38,6 +38,7 @@ ROOT_ALLOWED_FILES = {"requirements.txt", "tools/server.mjs"}
 ROLLBACK_DIR_NAME = "rollback"
 PENDING_UPDATE_FILE = ".pending_update.json"
 STARTUP_MAX_WAIT = 45
+PLAYWRIGHT_CHROMIUM_DIR_PREFIX = "chromium-"
 
 ROLLBACK_SKIP_ITEMS = {".env", "runtime_state.json", ROLLBACK_DIR_NAME, PENDING_UPDATE_FILE,
                        "cache", "outputs", "logs", "__pycache__", ".git"}
@@ -170,6 +171,70 @@ def _install_requirements(root: Path) -> str:
         return "pip install 超时"
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
+
+
+def _module_available(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _playwright_chromium_installed() -> bool:
+    cache_root = Path(os.getenv("PLAYWRIGHT_BROWSERS_PATH", "")).expanduser() if os.getenv("PLAYWRIGHT_BROWSERS_PATH") else Path.home() / "AppData" / "Local" / "ms-playwright"
+    if os.getenv("PLAYWRIGHT_BROWSERS_PATH") == "0":
+        try:
+            import playwright
+            cache_root = Path(playwright.__file__).resolve().parent / "driver" / "package" / ".local-browsers"
+        except Exception:
+            return False
+    if not cache_root.exists():
+        return False
+    return any(path.is_dir() and path.name.startswith(PLAYWRIGHT_CHROMIUM_DIR_PREFIX) for path in cache_root.iterdir())
+
+
+def _install_crawl4ai_runtime(root: Path) -> str:
+    errors: list[str] = []
+    if not _module_available("crawl4ai"):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "crawl4ai>=0.7.0"],
+                capture_output=False,
+                timeout=600,
+                cwd=str(root),
+            )
+            if result.returncode != 0:
+                errors.append(f"pip install crawl4ai 返回 exit code {result.returncode}")
+        except subprocess.TimeoutExpired:
+            errors.append("pip install crawl4ai 超时")
+        except Exception as exc:
+            errors.append(f"pip install crawl4ai 失败：{type(exc).__name__}: {exc}")
+    if not _module_available("playwright"):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "playwright>=1.40.0"],
+                capture_output=False,
+                timeout=300,
+                cwd=str(root),
+            )
+            if result.returncode != 0:
+                errors.append(f"pip install playwright 返回 exit code {result.returncode}")
+        except subprocess.TimeoutExpired:
+            errors.append("pip install playwright 超时")
+        except Exception as exc:
+            errors.append(f"pip install playwright 失败：{type(exc).__name__}: {exc}")
+    if _module_available("playwright") and not _playwright_chromium_installed():
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=False,
+                timeout=900,
+                cwd=str(root),
+            )
+            if result.returncode != 0:
+                errors.append(f"playwright install chromium 返回 exit code {result.returncode}")
+        except subprocess.TimeoutExpired:
+            errors.append("playwright install chromium 超时")
+        except Exception as exc:
+            errors.append(f"playwright install chromium 失败：{type(exc).__name__}: {exc}")
+    return "；".join(errors)
 
 
 def _update_vndb_data(root: Path) -> str:
@@ -307,6 +372,13 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
     pip_error = _install_requirements(bot_root)
 
+    await ctx["reply"](event, "正在检查 Crawl4AI 与 Playwright Chromium 运行环境...")
+    crawl4ai_error = _install_crawl4ai_runtime(bot_root)
+    if crawl4ai_error:
+        await ctx["reply"](event, f"Crawl4AI 运行环境准备失败，将继续重启 bot：{crawl4ai_error}")
+    else:
+        await ctx["reply"](event, "Crawl4AI 运行环境已就绪。")
+
     await ctx["reply"](event, "正在使用 tools/server.mjs 更新并解压 VNDB 数据...")
     vndb_error = _update_vndb_data(bot_root)
     if vndb_error:
@@ -330,6 +402,9 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     stop_vndb_json_server = ctx.get("stop_vndb_json_server")
     if callable(stop_vndb_json_server):
         await stop_vndb_json_server()
+    stop_searxng_server = ctx.get("stop_searxng_server")
+    if callable(stop_searxng_server):
+        await stop_searxng_server()
     await ctx["reply"](event, "更新文件已就绪，正在启动新版本 bot...")
     await asyncio.sleep(0.5)
 
@@ -352,6 +427,8 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             ctx["log"](f"Update finished with copy warnings: {detail}")
         if pip_error:
             ctx["log"](f"Update finished with pip warning: {pip_error}")
+        if crawl4ai_error:
+            ctx["log"](f"Update finished with Crawl4AI warning: {crawl4ai_error}")
         if vndb_error:
             ctx["log"](f"Update finished with VNDB warning: {vndb_error}")
         os._exit(0)

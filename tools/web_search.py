@@ -9,12 +9,10 @@ import aiohttp
 
 
 DEFAULT_SEARXNG_INSTANCES = [
-    "https://search.inetol.net",
-    "https://searx.tiekoetter.com",
-    "https://search.sapti.me",
+    "http://127.0.0.1:8888",
 ]
 MAX_RESULTS = 8
-TOOL_DESCRIPTION = "根据用户问题搜索互联网，返回候选网页列表。适用于用户没有提供明确 URL、需要查询资料、查找官网、查找文档、查询近期信息、对开放性问题寻找来源时。此工具只返回搜索结果摘要，不读取完整网页正文；如果需要基于网页内容回答，应继续调用 web_fetch 读取具体 URL。公共 SearXNG 实例稳定性不保证，若搜索失败应向用户说明。"
+TOOL_DESCRIPTION = "根据用户问题通过本地 SearXNG 搜索互联网，返回候选网页列表。适用于用户没有提供明确 URL、需要查询资料、查找官网、查找文档、查询近期信息、对开放性问题寻找来源时。此工具只返回搜索结果摘要，不读取完整网页正文；如果需要基于网页内容回答，应继续调用 web_fetch 读取具体 URL。"
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -88,14 +86,28 @@ def format_result_item(index: int, item: dict[str, Any]) -> list[str]:
 
 
 async def search_instance(instance: str, query: str, language: str) -> dict[str, Any]:
+    base = instance.rstrip("/")
+    if base.endswith("/llm/search"):
+        timeout = aiohttp.ClientTimeout(total=60)
+        payload = {"q": query, "query": query, "language": language or "zh-CN", "safesearch": 1}
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(base, json=payload, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                text = await resp.text(errors="replace")
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status}: {text[:300]}")
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"返回内容不是 JSON: {text[:300]}") from exc
+
     params = urlencode({
         "q": query,
         "format": "json",
         "language": language or "zh-CN",
         "safesearch": 1,
     })
-    url = f"{instance.rstrip('/')}/search?{params}"
-    timeout = aiohttp.ClientTimeout(total=25)
+    url = f"{base}/search?{params}"
+    timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
             text = await resp.text(errors="replace")
@@ -128,7 +140,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
 
     if data is None:
         detail = "；".join(errors[-3:])
-        return {"ok": False, "content": f"搜索失败：公共 SearXNG 实例暂不可用。{detail}"}
+        return {"ok": False, "content": f"搜索失败：本地 SearXNG 暂不可用。{detail}"}
 
     raw_results = data.get("results") if isinstance(data, dict) else []
     if not isinstance(raw_results, list) or not raw_results:

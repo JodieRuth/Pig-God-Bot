@@ -4,7 +4,9 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -41,6 +43,19 @@ VNDB_SERVER_SCRIPT = TOOLS_DIR / "server.mjs"
 VNDB_JSON_SERVER_START_TIMEOUT = int(os.getenv("VNDB_JSON_SERVER_START_TIMEOUT", "45"))
 VNDB_JSON_SERVER_PROCESS: asyncio.subprocess.Process | None = None
 VNDB_JSON_SERVER_LOG_TASKS: set[asyncio.Task[Any]] = set()
+
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888").rstrip("/")
+SEARXNG_HEALTH_URL = f"{SEARXNG_URL}/"
+SEARXNG_AUTO_START = os.getenv("SEARXNG_AUTO_START", "1") != "0"
+SEARXNG_ROOT = Path(os.getenv("SEARXNG_ROOT", str(ROOT.parent / "SearXNG"))).resolve()
+SEARXNG_RUNTIME_DIR = Path(os.getenv("SEARXNG_RUNTIME_DIR", str(SEARXNG_ROOT / "runtime"))).resolve()
+SEARXNG_PYTHON_BIN = Path(os.getenv("SEARXNG_PYTHON_BIN", str(SEARXNG_RUNTIME_DIR / ".venv" / "Scripts" / "python.exe"))).resolve()
+SEARXNG_GRANIAN_BIN = Path(os.getenv("SEARXNG_GRANIAN_BIN", str(SEARXNG_RUNTIME_DIR / ".venv" / "Scripts" / "granian.exe"))).resolve()
+SEARXNG_SETTINGS_PATH = Path(os.getenv("SEARXNG_SETTINGS_PATH", str(SEARXNG_RUNTIME_DIR / "settings-local.yml"))).resolve()
+SEARXNG_START_TIMEOUT = int(os.getenv("SEARXNG_START_TIMEOUT", "60"))
+SEARXNG_USE_SYSTEM_PROXY = os.getenv("SEARXNG_USE_SYSTEM_PROXY", "1") != "0"
+SEARXNG_PROCESS: asyncio.subprocess.Process | None = None
+SEARXNG_LOG_TASKS: set[asyncio.Task[Any]] = set()
 
 
 def clear_cache_dir() -> None:
@@ -1629,6 +1644,7 @@ def clear_current_context(event: dict[str, Any]) -> int:
 async def reboot_process() -> None:
     log("Reboot requested, replacing current process")
     await stop_vndb_json_server()
+    await stop_searxng_server()
     os.environ["LOCAL_ONEBOT_LOG_FILE"] = str(LOG_FILE)
     sys.stdout.flush()
     sys.stderr.flush()
@@ -1669,6 +1685,7 @@ def command_context() -> dict[str, Any]:
         "clear_current_context": clear_current_context,
         "reboot_process": reboot_process,
         "stop_vndb_json_server": stop_vndb_json_server,
+        "stop_searxng_server": stop_searxng_server,
         "scope_key": scope_key,
         "reload_runtime_files": reload_runtime_files,
         "tool_infos": [item.copy() for item in TOOL_INFOS],
@@ -2328,6 +2345,216 @@ async def _handle_pending_update() -> None:
     pending_file.unlink(missing_ok=True)
 
 
+async def searxng_server_is_healthy() -> bool:
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(SEARXNG_HEALTH_URL) as resp:
+                return resp.status < 500
+    except Exception:
+        return False
+
+
+async def pipe_searxng_server_log(stream: asyncio.StreamReader | None, name: str) -> None:
+    if stream is None:
+        return
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        log(f"SearXNG {name}: {line.decode('utf-8', errors='replace').rstrip()}")
+
+
+def normalize_proxy_url(value: str) -> str:
+    proxy = value.strip()
+    if not proxy:
+        return ""
+    if "://" not in proxy:
+        proxy = f"http://{proxy}"
+    return proxy
+
+
+def windows_system_proxy_url() -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        proc = subprocess.run(
+            ["reg", "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if "0x1" not in proc.stdout:
+            return ""
+        proc = subprocess.run(
+            ["reg", "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyServer"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return ""
+        match = re.search(r"ProxyServer\s+REG_SZ\s+(.+)", proc.stdout)
+        if not match:
+            return ""
+        raw = match.group(1).strip()
+        values: dict[str, str] = {}
+        for item in raw.split(";"):
+            if "=" in item:
+                key, _, val = item.partition("=")
+                values[key.strip().lower()] = val.strip()
+        return normalize_proxy_url(values.get("https") or values.get("http") or raw)
+    except Exception as exc:
+        log(f"Read Windows system proxy failed: {exception_detail(exc)}")
+        return ""
+
+
+def apply_proxy_env(env: dict[str, str]) -> str:
+    proxy = normalize_proxy_url(
+        os.getenv("SEARXNG_PROXY")
+        or os.getenv("HTTPS_PROXY")
+        or os.getenv("https_proxy")
+        or os.getenv("HTTP_PROXY")
+        or os.getenv("http_proxy")
+        or ""
+    )
+    if not proxy and SEARXNG_USE_SYSTEM_PROXY:
+        proxy = windows_system_proxy_url()
+    if not proxy:
+        return ""
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        env[key] = proxy
+    env.setdefault("NO_PROXY", "127.0.0.1,localhost")
+    env.setdefault("no_proxy", env["NO_PROXY"])
+    return proxy
+
+
+async def install_searxng_dependencies() -> str:
+    if not SEARXNG_RUNTIME_DIR.exists():
+        return f"SearXNG runtime directory missing: {SEARXNG_RUNTIME_DIR}"
+    if not SEARXNG_PYTHON_BIN.exists():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "venv", str(SEARXNG_RUNTIME_DIR / ".venv"),
+                cwd=str(SEARXNG_RUNTIME_DIR),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+            if proc.returncode != 0:
+                output = (stdout + stderr).decode("utf-8", errors="replace")
+                return f"SearXNG venv creation returned {proc.returncode}: {sanitize_error_detail(output)}"
+        except asyncio.TimeoutError:
+            return "SearXNG venv creation timed out"
+        except Exception as exc:
+            return exception_detail(exc)
+    if not SEARXNG_PYTHON_BIN.exists():
+        return f"SearXNG venv python missing: {SEARXNG_PYTHON_BIN}"
+    requirements = [SEARXNG_RUNTIME_DIR / "requirements.txt", SEARXNG_RUNTIME_DIR / "requirements-server.txt"]
+    missing = [str(path) for path in requirements if not path.exists()]
+    if missing:
+        return f"SearXNG requirements missing: {'; '.join(missing)}"
+    if SEARXNG_GRANIAN_BIN.exists():
+        return ""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(SEARXNG_PYTHON_BIN), "-m", "pip", "install", "-r", str(requirements[0]), "-r", str(requirements[1]),
+            cwd=str(SEARXNG_RUNTIME_DIR),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+        if proc.returncode != 0:
+            output = (stdout + stderr).decode("utf-8", errors="replace")
+            return f"SearXNG dependency install returned {proc.returncode}: {sanitize_error_detail(output)}"
+    except asyncio.TimeoutError:
+        return "SearXNG dependency install timed out"
+    except Exception as exc:
+        return exception_detail(exc)
+    if not SEARXNG_GRANIAN_BIN.exists():
+        return f"SearXNG granian missing after install: {SEARXNG_GRANIAN_BIN}"
+    return ""
+
+
+async def start_searxng_server() -> None:
+    global SEARXNG_PROCESS
+    if not SEARXNG_AUTO_START:
+        log("SearXNG auto-start disabled")
+        return
+    if await searxng_server_is_healthy():
+        log(f"SearXNG already healthy: {SEARXNG_URL}")
+        return
+    install_error = await install_searxng_dependencies()
+    if install_error:
+        log(f"SearXNG dependency check failed: {install_error}")
+        return
+    if not SEARXNG_SETTINGS_PATH.exists():
+        log(f"SearXNG settings missing: {SEARXNG_SETTINGS_PATH}")
+        return
+    env = os.environ.copy()
+    env["SEARXNG_SETTINGS_PATH"] = str(SEARXNG_SETTINGS_PATH)
+    proxy = apply_proxy_env(env)
+    if proxy:
+        log(f"SearXNG proxy enabled: {proxy}")
+    try:
+        SEARXNG_PROCESS = await asyncio.create_subprocess_exec(
+            str(SEARXNG_GRANIAN_BIN),
+            "--interface", "wsgi",
+            "--host", "0.0.0.0",
+            "--port", "8888",
+            "searx.webapp:app",
+            cwd=str(SEARXNG_RUNTIME_DIR),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:
+        log(f"SearXNG start failed: {exception_detail(exc)}")
+        return
+    for stream, name in ((SEARXNG_PROCESS.stdout, "stdout"), (SEARXNG_PROCESS.stderr, "stderr")):
+        task = asyncio.create_task(pipe_searxng_server_log(stream, name))
+        SEARXNG_LOG_TASKS.add(task)
+        task.add_done_callback(SEARXNG_LOG_TASKS.discard)
+    for _ in range(SEARXNG_START_TIMEOUT):
+        if await searxng_server_is_healthy():
+            if SEARXNG_PROCESS.returncode is None:
+                log(f"SearXNG started: {SEARXNG_URL}")
+            else:
+                log(f"SearXNG available after spawned process exited: {SEARXNG_URL}")
+            return
+        if SEARXNG_PROCESS.returncode is not None:
+            log(f"SearXNG exited early: {SEARXNG_PROCESS.returncode}; rechecking existing server")
+            for _ in range(5):
+                if await searxng_server_is_healthy():
+                    log(f"SearXNG already available: {SEARXNG_URL}")
+                    return
+                await asyncio.sleep(1)
+            return
+        await asyncio.sleep(1)
+    log(f"SearXNG start timed out: {SEARXNG_URL}")
+
+
+async def stop_searxng_server() -> None:
+    global SEARXNG_PROCESS
+    if SEARXNG_PROCESS is None or SEARXNG_PROCESS.returncode is not None:
+        return
+    if os.name == "nt":
+        try:
+            SEARXNG_PROCESS.send_signal(signal.CTRL_BREAK_EVENT)
+        except Exception:
+            SEARXNG_PROCESS.terminate()
+    else:
+        SEARXNG_PROCESS.terminate()
+    try:
+        await asyncio.wait_for(SEARXNG_PROCESS.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        SEARXNG_PROCESS.kill()
+        await SEARXNG_PROCESS.wait()
+    SEARXNG_PROCESS = None
+
+
 async def vndb_json_server_is_healthy() -> bool:
     try:
         timeout = aiohttp.ClientTimeout(total=5)
@@ -2409,6 +2636,7 @@ async def stop_vndb_json_server() -> None:
 
 async def main() -> None:
     await _handle_pending_update()
+    await start_searxng_server()
     await start_vndb_json_server()
     if "zhubi_idle_tick" not in jobs:
         jobs["zhubi_idle_tick"] = asyncio.create_task(zhubi_idle_tick_loop())
@@ -2434,6 +2662,7 @@ async def main() -> None:
                 await asyncio.sleep(5)
     finally:
         await stop_vndb_json_server()
+        await stop_searxng_server()
 
 
 if __name__ == "__main__":

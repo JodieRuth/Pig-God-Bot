@@ -3,14 +3,16 @@ from __future__ import annotations
 import ipaddress
 import socket
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
-import aiohttp
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 
 
 MAX_URL_LENGTH = 2000
 MAX_CONTENT_CHARS = 30000
-TOOL_DESCRIPTION = "读取用户明确提供的公开网页 URL，并返回清洗后的 Markdown 正文。适用于网页总结、网页问答、资料整理、文档阅读、提取网页中的具体信息。当用户提供 URL，或 web_search 返回结果中需要深入阅读某个 URL 时调用。不能用于搜索互联网，不能访问需要登录、验证码、私有权限或复杂交互的网站。"
+TOOL_DESCRIPTION = "读取用户明确提供的公开网页 URL，并使用 Crawl4AI 返回清洗后的 Markdown 正文。适用于网页总结、网页问答、资料整理、文档阅读、提取网页中的具体信息。当用户提供 URL，或 web_search 返回结果中需要深入阅读某个 URL 时调用。不能用于搜索互联网，不能访问需要登录、验证码、私有权限或复杂交互的网站。"
+CRAWL4AI_PAGE_TIMEOUT_MS = 30000
+CRAWL4AI_WORD_COUNT_THRESHOLD = 10
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -86,21 +88,29 @@ def validate_url(raw_url: str) -> str:
     return url
 
 
-def jina_reader_url(url: str) -> str:
-    return "https://r.jina.ai/http://" + quote(url, safe="")
+async def fetch_with_crawl4ai(url: str) -> tuple[str, int | None, str]:
+    browser_config = BrowserConfig(headless=True, verbose=False)
+    run_config = CrawlerRunConfig(
+        page_timeout=CRAWL4AI_PAGE_TIMEOUT_MS,
+        word_count_threshold=CRAWL4AI_WORD_COUNT_THRESHOLD,
+    )
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        result = await crawler.arun(url=url, config=run_config)
 
+    success = bool(getattr(result, "success", False))
+    status_code = getattr(result, "status_code", None)
+    error_message = str(getattr(result, "error_message", "") or "").strip()
+    markdown = str(getattr(result, "markdown", "") or "").strip()
 
-async def fetch_with_jina(url: str) -> str:
-    timeout = aiohttp.ClientTimeout(total=45)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(jina_reader_url(url), headers={"User-Agent": "Mozilla/5.0"}) as resp:
-            text = await resp.text(errors="replace")
-            if resp.status >= 400:
-                raise RuntimeError(f"Jina Reader HTTP {resp.status}: {text[:300]}")
-            text = text.strip()
-            if not text:
-                raise RuntimeError("Jina Reader 返回内容为空")
-            return text
+    if not success:
+        raise RuntimeError(error_message or "Crawl4AI 抓取失败")
+    if isinstance(status_code, int) and status_code in {401, 403}:
+        raise RuntimeError(f"目标站拒绝访问：HTTP {status_code}")
+    if isinstance(status_code, int) and status_code >= 400:
+        raise RuntimeError(f"目标站返回 HTTP {status_code}")
+    if not markdown:
+        raise RuntimeError("Crawl4AI 返回 Markdown 为空")
+    return markdown, status_code if isinstance(status_code, int) else None, error_message
 
 
 async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
@@ -111,7 +121,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
 
     try:
         url = validate_url(raw_url)
-        content = await fetch_with_jina(url)
+        content, status_code, crawl_error = await fetch_with_crawl4ai(url)
     except Exception as exc:
         return {"ok": False, "content": f"网页读取失败：{ctx['exception_detail'](exc)}"}
 
@@ -124,9 +134,12 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
     lines = [
         "网页读取成功",
         f"URL: {url}",
-        "来源: Jina Reader",
+        "来源: Crawl4AI",
+        f"HTTP 状态: {status_code if status_code is not None else '未知'}",
         f"内容长度: {original_length} 字符",
     ]
+    if crawl_error:
+        lines.append(f"Crawl4AI 提示: {crawl_error}")
     if reason:
         lines.append(f"读取目的: {reason}")
     if truncated:
