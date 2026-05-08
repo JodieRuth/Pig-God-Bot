@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-TOOL_DESCRIPTION = "启动一个后台图像生成或图像编辑任务。仅用于合规的图片生成、参考图改图、替换主体、改变风格、图文生图、图像合成等请求。若请求或上下文涉及政治敏感、中国大陆政治不正确、违法违规、暴力恐怖、色情低俗、赌博诈骗、侵犯隐私、规避平台审核、攻击骚扰、仇恨歧视、自伤自杀诱导、未成年人不当内容、伪造证件票据、冒充真实个人或任何 QQ 平台和中国大陆法规不允许的内容，禁止调用此工具，必须直接拒绝。"
+TOOL_DESCRIPTION = "启动一个后台图像生成或图像编辑任务。仅用于合规的图片生成、参考图改图、替换主体、改变风格、图文生图、图像合成等请求。调用本工具时，必须由 LLM 在 prompt 参数中写入最终、完整、可直接发送给图像模型的中文提示词；程序不会再把聊天上下文、系统提示或用户原话追加进绘图接口。需要参考图片时，必须用 image_indexes 明确指定要传入的图片编号；未指定的图片不会传给绘图接口。若请求或上下文涉及政治敏感、中国大陆政治不正确、违法违规、暴力恐怖、色情低俗、赌博诈骗、侵犯隐私、规避平台审核、攻击骚扰、仇恨歧视、自伤自杀诱导、未成年人不当内容、伪造证件票据、冒充真实个人或任何 QQ 平台和中国大陆法规不允许的内容，禁止调用此工具，必须直接拒绝。"
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -20,12 +20,12 @@ def definition(ctx: dict[str, Any]) -> dict[str, Any]:
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "给图像生成模型的完整中文提示词。必须保留用户对图1、图2等图片编号的引用和编辑目标。提示词不得包含政治敏感、中国大陆政治不正确、违法违规、色情低俗、隐私侵犯、攻击骚扰等不允许内容。在传入时，尽可能根据图片实际内容与用户目的对提示词进行优化。",
+                        "description": "最终、完整、可直接发送给图像生成模型的中文提示词。必须由 LLM 根据用户当前请求、必要聊天上下文和所选图片编号自行整合完成；程序不会再额外拼接上下文。若需要编辑或引用图片，必须在提示词中明确说明图1、图2等编号各自的用途、编辑目标、保留内容和输出要求。不得包含政治敏感、中国大陆政治不正确、违法违规、色情低俗、隐私侵犯、攻击骚扰等不允许内容。",
                     },
                     "image_indexes": {
                         "type": "array",
                         "items": {"type": "integer"},
-                        "description": "要传给生图工具的图片编号列表，例如 [1,2]。编号来自输入图片顺序：图1 是第一张输入图片，图2 是第二张。若本次是纯文生图，就不要填写任何图片编号。",
+                        "description": "实际传给生图接口的图片编号列表，例如 [1,2]。编号来自 LLM 输入图片顺序：图1 是第一张输入图片，图2 是第二张。只有这里列出的图片会被传入绘图 API；纯文生图必须省略或传空数组。",
                     },
                     "notice": {
                         "type": "string",
@@ -105,34 +105,21 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
     if not image_url:
         raise RuntimeError("未配置生图接口地址")
 
-    max_messages = int(ctx["max_context_messages"])
-    max_images = int(ctx["max_context_images"])
-    context = "\n".join(context_texts[-max_messages:])
-    image_order_note = build_image_order_note(images, ctx)
-    prompt_parts = []
-    if context:
-        prompt_parts.append(f"最近聊天上下文，仅用于理解用户意图、图片指代、发送者和时间顺序，不要当作必须出现在图片里的内容：\n{context}")
-    if image_order_note:
-        prompt_parts.append(image_order_note)
-    prompt_parts.append(f"当前生图请求：\n{prompt}")
-    full_prompt = "\n\n".join(prompt_parts)
-    headers = {"Authorization": f"Bearer {image_key}"} if image_key else {}
-
     image_paths = [ctx["image_path"](record) for record in images[:max_images]]
     request_url = image_api_url_for_request(bool(image_paths), ctx)
     if image_paths:
         form = aiohttp.FormData()
         form.add_field("model", image_model)
-        form.add_field("prompt", full_prompt)
+        form.add_field("prompt", prompt)
         form.add_field("stream", "True")
         form.add_field("partial_images", "0")
         for image in image_paths:
             form.add_field("image", image.open("rb"), filename=image.name, content_type="image/png" if image.suffix.lower() == ".png" else "image/jpeg")
         payload: Any = form
     else:
-        payload = {"model": image_model, "prompt": full_prompt, "stream": True, "partial_images": 0}
+        payload = {"model": image_model, "prompt": prompt, "stream": True, "partial_images": 0}
 
-    ctx["log_json"]("Image request", {"url": request_url, "prompt": full_prompt, "images": [str(p) for p in image_paths], "stream": True})
+    ctx["log_json"]("Image request", {"url": request_url, "prompt": prompt, "images": [str(p) for p in image_paths], "stream": True})
     async with aiohttp.ClientSession(headers=headers) as session:
         if image_paths:
             request = session.post(request_url, data=payload, timeout=60 * 30)
@@ -198,9 +185,9 @@ def select_images(images: list[dict[str, Any]], image_indexes: list[Any]) -> lis
 
 
 async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
-    prompt = str(args.get("prompt") or runtime.get("prompt") or "").strip()
+    prompt = str(args.get("prompt") or "").strip()
     if not prompt:
-        return {"ok": False, "content": "生图任务启动失败：缺少 prompt 参数。"}
+        return {"ok": False, "content": "生图任务启动失败：缺少工具参数 prompt。"}
     images = select_images(runtime.get("images", []), args.get("image_indexes") or [])
     job_id = uuid.uuid4().hex[:8]
     notice = str(args.get("notice") or "收到，图像任务已开始。").strip() or "收到，图像任务已开始。"

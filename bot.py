@@ -1236,30 +1236,20 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
     if not image_url:
         raise RuntimeError("未配置生图接口地址")
 
-    context = "\n".join(context_texts[-MAX_CONTEXT_MESSAGES:])
-    image_order_note = build_image_order_note(images)
-    prompt_parts = []
-    if context:
-        prompt_parts.append(f"最近聊天上下文，仅用于理解用户意图、图片指代、发送者和时间顺序，不要当作必须出现在图片里的内容：\n{context}")
-    if image_order_note:
-        prompt_parts.append(image_order_note)
-    prompt_parts.append(f"当前生图请求：\n{prompt}")
-    full_prompt = "\n\n".join(prompt_parts)
     headers = {"Authorization": f"Bearer {image_key}"} if image_key else {}
-
     image_paths = [image_path(record) for record in images[:MAX_CONTEXT_IMAGES]]
     request_url = image_api_url_for_request(bool(image_paths))
     if image_paths:
         form = aiohttp.FormData()
         form.add_field("model", image_model)
-        form.add_field("prompt", full_prompt)
+        form.add_field("prompt", prompt)
         for image in image_paths:
             form.add_field("image", image.open("rb"), filename=image.name, content_type="image/png" if image.suffix.lower() == ".png" else "image/jpeg")
         payload: Any = form
     else:
-        payload = {"model": image_model, "prompt": full_prompt}
+        payload = {"model": image_model, "prompt": prompt}
 
-    log_json("Image request", {"url": request_url, "prompt": full_prompt, "images": [str(p) for p in image_paths], "headers": headers})
+    log_json("Image request", {"url": request_url, "prompt": prompt, "images": [str(p) for p in image_paths], "headers": headers})
     async with aiohttp.ClientSession(headers=headers) as session:
         if image_paths:
             request = session.post(request_url, data=payload, timeout=60 * 30)
