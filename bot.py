@@ -56,6 +56,7 @@ SEARXNG_START_TIMEOUT = int(os.getenv("SEARXNG_START_TIMEOUT", "60"))
 SEARXNG_USE_SYSTEM_PROXY = os.getenv("SEARXNG_USE_SYSTEM_PROXY", "1") != "0"
 SEARXNG_PROCESS: asyncio.subprocess.Process | None = None
 SEARXNG_LOG_TASKS: set[asyncio.Task[Any]] = set()
+SERVICE_KILL_TIMEOUT = int(os.getenv("SERVICE_KILL_TIMEOUT", "10"))
 
 
 def clear_cache_dir() -> None:
@@ -1641,10 +1642,94 @@ def clear_current_context(event: dict[str, Any]) -> int:
     return count
 
 
-async def reboot_process() -> None:
-    log("Reboot requested, replacing current process")
+async def run_command_capture(*args: str, timeout: int = 10) -> tuple[int, str]:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        output = (stdout + stderr).decode("utf-8", errors="replace")
+        return proc.returncode or 0, output
+    except asyncio.TimeoutError:
+        return -1, "timeout"
+    except Exception as exc:
+        return -1, exception_detail(exc)
+
+
+async def windows_kill_processes_by_commandline(patterns: list[str]) -> int:
+    if os.name != "nt" or not patterns:
+        return 0
+    escaped = "|".join(re.escape(item) for item in patterns if item)
+    if not escaped:
+        return 0
+    command = (
+        "$current=$PID; "
+        "$procs=Get-CimInstance Win32_Process | "
+        f"Where-Object {{ $_.ProcessId -ne $current -and $_.CommandLine -match '{escaped}' }}; "
+        "$procs | ForEach-Object { "
+        "Write-Output \"Killing service process $($_.ProcessId): $($_.Name)\"; "
+        "Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue "
+        "}; "
+        "Write-Output \"Killed count: $($procs.Count)\""
+    )
+    code, output = await run_command_capture("powershell", "-NoProfile", "-Command", command, timeout=SERVICE_KILL_TIMEOUT)
+    if output.strip():
+        log(output.strip())
+    if code != 0:
+        log(f"Kill service processes command returned {code}: {sanitize_error_detail(output)}")
+    match = re.search(r"Killed count:\s*(\d+)", output)
+    return int(match.group(1)) if match else 0
+
+
+async def windows_kill_processes_on_ports(ports: list[int]) -> int:
+    if os.name != "nt" or not ports:
+        return 0
+    port_list = ",".join(str(port) for port in ports)
+    command = (
+        f"$ports=@({port_list}); "
+        "$pids=Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | "
+        "Where-Object { $ports -contains $_.LocalPort } | "
+        "Select-Object -ExpandProperty OwningProcess -Unique; "
+        "$pids | ForEach-Object { "
+        "Write-Output \"Killing listener PID $_\"; "
+        "taskkill /PID $_ /T /F 2>$null | Out-String | Write-Output "
+        "}; "
+        "Write-Output \"Killed port listeners: $($pids.Count)\""
+    )
+    code, output = await run_command_capture("powershell", "-NoProfile", "-Command", command, timeout=SERVICE_KILL_TIMEOUT)
+    if output.strip():
+        log(output.strip())
+    if code != 0:
+        log(f"Kill port listeners command returned {code}: {sanitize_error_detail(output)}")
+    match = re.search(r"Killed port listeners:\s*(\d+)", output)
+    return int(match.group(1)) if match else 0
+
+
+async def force_reset_managed_services() -> None:
     await stop_vndb_json_server()
     await stop_searxng_server()
+    if os.name == "nt":
+        searxng_patterns = [
+            str(SEARXNG_ROOT),
+            str(SEARXNG_RUNTIME_DIR),
+            "searx.webapp:app",
+            "start-searxng",
+        ]
+        vndb_patterns = [
+            str(VNDB_SERVER_SCRIPT),
+            "server.mjs",
+        ]
+        await windows_kill_processes_by_commandline(searxng_patterns)
+        await windows_kill_processes_by_commandline(vndb_patterns)
+        await windows_kill_processes_on_ports([8888, 8787])
+        await asyncio.sleep(1)
+
+
+async def reboot_process() -> None:
+    log("Reboot requested, replacing current process")
+    await force_reset_managed_services()
     os.environ["LOCAL_ONEBOT_LOG_FILE"] = str(LOG_FILE)
     sys.stdout.flush()
     sys.stderr.flush()
