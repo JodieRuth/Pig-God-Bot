@@ -2593,6 +2593,119 @@ async def install_searxng_dependencies() -> str:
     return ""
 
 
+async def run_searxng_python_capture(code: str, env: dict[str, str], timeout: int = 20) -> tuple[int, str]:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(SEARXNG_PYTHON_BIN), "-c", code,
+            cwd=str(SEARXNG_RUNTIME_DIR),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        output = (stdout + stderr).decode("utf-8", errors="replace")
+        return proc.returncode or 0, output
+    except asyncio.TimeoutError:
+        return -1, "timeout"
+    except Exception as exc:
+        return -1, exception_detail(exc)
+
+
+async def log_searxng_runtime_config(env: dict[str, str]) -> None:
+    code = r'''
+import json
+from searx import settings
+from searx.engines import engines
+names = ["bing", "brave", "duckduckgo", "google"]
+outgoing = settings.get("outgoing", {})
+engine_info = {}
+for name in names:
+    engine = engines.get(name)
+    if engine is None:
+        engine_info[name] = {"loaded": False}
+    else:
+        engine_info[name] = {
+            "loaded": True,
+            "timeout": getattr(engine, "timeout", None),
+            "disabled": getattr(engine, "disabled", None),
+            "categories": list(getattr(engine, "categories", []) or []),
+        }
+print(json.dumps({
+    "settings_path": settings.get("settings_path"),
+    "outgoing": {
+        "request_timeout": outgoing.get("request_timeout"),
+        "max_request_timeout": outgoing.get("max_request_timeout"),
+        "proxies": outgoing.get("proxies"),
+        "enable_http2": outgoing.get("enable_http2"),
+    },
+    "engines": engine_info,
+}, ensure_ascii=False, default=str))
+'''
+    code_status, output = await run_searxng_python_capture(code, env, timeout=30)
+    if output.strip():
+        log(f"SearXNG runtime config check rc={code_status}: {sanitize_error_detail(output.strip())}")
+    else:
+        log(f"SearXNG runtime config check rc={code_status}: empty output")
+
+
+async def log_searxng_httpx_probe(env: dict[str, str]) -> None:
+    code = r'''
+import json
+import httpx
+targets = {
+    "duckduckgo_env": ("https://duckduckgo.com/html/?q=Wikipedia", True),
+    "bing_env": ("https://www.bing.com/search?q=Wikipedia", True),
+    "brave_env": ("https://search.brave.com/search?q=Wikipedia", True),
+    "google_env": ("https://www.google.com/search?q=Wikipedia", True),
+    "duckduckgo_direct": ("https://duckduckgo.com/html/?q=Wikipedia", False),
+}
+result = {}
+for name, item in targets.items():
+    url, trust_env = item
+    try:
+        with httpx.Client(timeout=20, trust_env=trust_env, follow_redirects=True) as client:
+            response = client.get(url)
+        result[name] = {"ok": True, "status": response.status_code, "url": str(response.url)}
+    except Exception as exc:
+        result[name] = {"ok": False, "error_type": type(exc).__name__, "error": repr(exc), "cause": repr(getattr(exc, "__cause__", None)), "context": repr(getattr(exc, "__context__", None))}
+print(json.dumps(result, ensure_ascii=False))
+'''
+    code_status, output = await run_searxng_python_capture(code, env, timeout=90)
+    if output.strip():
+        log(f"SearXNG httpx probe rc={code_status}: {sanitize_error_detail(output.strip())}")
+    else:
+        log(f"SearXNG httpx probe rc={code_status}: empty output")
+
+
+async def log_searxng_search_smoke() -> None:
+    params = {
+        "q": "Wikipedia",
+        "format": "json",
+        "language": "zh-CN",
+        "safesearch": "1",
+        "timeout_limit": "30",
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=35)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{SEARXNG_URL}/search", params=params) as resp:
+                text = await resp.text()
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    log(f"SearXNG search smoke status={resp.status}: {sanitize_error_detail(text[:1000])}")
+                    return
+        if isinstance(data, dict):
+            raw_results = data.get("results")
+            unresponsive = data.get("unresponsive_engines")
+            result_count = len(raw_results) if isinstance(raw_results, list) else 0
+            log(f"SearXNG search smoke status={resp.status}: results={result_count}, unresponsive={sanitize_error_detail(json.dumps(unresponsive, ensure_ascii=False, default=str))}")
+        else:
+            log(f"SearXNG search smoke status={resp.status}: non-object response")
+    except Exception as exc:
+        log(f"SearXNG search smoke failed: {exception_detail(exc)}")
+
+
 async def start_searxng_server() -> tuple[bool, str]:
     global SEARXNG_PROCESS
     if not SEARXNG_AUTO_START:
@@ -2641,6 +2754,9 @@ async def start_searxng_server() -> tuple[bool, str]:
         task.add_done_callback(SEARXNG_LOG_TASKS.discard)
     for _ in range(SEARXNG_START_TIMEOUT):
         if await searxng_server_is_healthy():
+            await log_searxng_runtime_config(env)
+            await log_searxng_httpx_probe(env)
+            await log_searxng_search_smoke()
             if SEARXNG_PROCESS.returncode is None:
                 log(f"SearXNG started: {SEARXNG_URL}")
                 return True, f"已启动：{SEARXNG_URL}"
@@ -2651,6 +2767,9 @@ async def start_searxng_server() -> tuple[bool, str]:
             log(f"SearXNG exited early: {SEARXNG_PROCESS.returncode}; rechecking existing server")
             for _ in range(5):
                 if await searxng_server_is_healthy():
+                    await log_searxng_runtime_config(env)
+                    await log_searxng_httpx_probe(env)
+                    await log_searxng_search_smoke()
                     log(f"SearXNG already available: {SEARXNG_URL}")
                     return True, f"已可用：{SEARXNG_URL}"
                 await asyncio.sleep(1)
