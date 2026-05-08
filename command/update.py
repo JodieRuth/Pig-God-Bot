@@ -327,6 +327,9 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     pending_file.write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
 
     ctx["bot_state"]["stopped"] = True
+    stop_vndb_json_server = ctx.get("stop_vndb_json_server")
+    if callable(stop_vndb_json_server):
+        await stop_vndb_json_server()
     await ctx["reply"](event, "更新文件已就绪，正在启动新版本 bot...")
     await asyncio.sleep(0.5)
 
@@ -372,7 +375,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
     await ctx["reply"](event, fail_msg)
     await asyncio.sleep(0.5)
-    ctx["reboot_process"]()
+    await ctx["reboot_process"]()
 
 
 COMMAND = {

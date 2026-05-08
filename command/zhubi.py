@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import importlib.util
 from datetime import date
@@ -172,10 +173,13 @@ def load_data() -> dict[str, Any]:
 
 def save_data(data: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = DATA_FILE.with_suffix(".json.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    tmp.replace(DATA_FILE)
+    tmp = DATA_FILE.with_name(f"{DATA_FILE.name}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(DATA_FILE)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def user_data(data: dict[str, Any], user_id: str) -> dict[str, Any]:

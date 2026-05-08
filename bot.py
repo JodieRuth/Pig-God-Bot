@@ -1617,8 +1617,9 @@ def clear_current_context(event: dict[str, Any]) -> int:
     return count
 
 
-def reboot_process() -> None:
+async def reboot_process() -> None:
     log("Reboot requested, replacing current process")
+    await stop_vndb_json_server()
     os.environ["LOCAL_ONEBOT_LOG_FILE"] = str(LOG_FILE)
     sys.stdout.flush()
     sys.stderr.flush()
@@ -1658,6 +1659,7 @@ def command_context() -> dict[str, Any]:
         "clear_contexts": contexts.clear,
         "clear_current_context": clear_current_context,
         "reboot_process": reboot_process,
+        "stop_vndb_json_server": stop_vndb_json_server,
         "scope_key": scope_key,
         "reload_runtime_files": reload_runtime_files,
         "tool_infos": [item.copy() for item in TOOL_INFOS],
@@ -2367,11 +2369,19 @@ async def start_vndb_json_server() -> None:
         VNDB_JSON_SERVER_LOG_TASKS.add(task)
         task.add_done_callback(VNDB_JSON_SERVER_LOG_TASKS.discard)
     for _ in range(VNDB_JSON_SERVER_START_TIMEOUT):
-        if VNDB_JSON_SERVER_PROCESS.returncode is not None:
-            log(f"VNDB JSON Server exited early: {VNDB_JSON_SERVER_PROCESS.returncode}")
-            return
         if await vndb_json_server_is_healthy():
-            log(f"VNDB JSON Server started: {VNDB_JSON_SERVER_URL}")
+            if VNDB_JSON_SERVER_PROCESS.returncode is None:
+                log(f"VNDB JSON Server started: {VNDB_JSON_SERVER_URL}")
+            else:
+                log(f"VNDB JSON Server available after spawned process exited: {VNDB_JSON_SERVER_URL}")
+            return
+        if VNDB_JSON_SERVER_PROCESS.returncode is not None:
+            log(f"VNDB JSON Server exited early: {VNDB_JSON_SERVER_PROCESS.returncode}; rechecking existing server")
+            for _ in range(5):
+                if await vndb_json_server_is_healthy():
+                    log(f"VNDB JSON Server already available: {VNDB_JSON_SERVER_URL}")
+                    return
+                await asyncio.sleep(1)
             return
         await asyncio.sleep(1)
     log(f"VNDB JSON Server start timed out: {VNDB_JSON_SERVER_URL}")

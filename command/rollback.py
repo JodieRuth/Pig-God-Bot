@@ -159,7 +159,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     ctx["bot_state"]["stopped"] = False
     await ctx["reply"](event, f"已回滚到 {timestamp}，正在重启 bot 进程。")
     await asyncio.sleep(0.5)
-    ctx["reboot_process"]()
+    await ctx["reboot_process"]()
 
 
 COMMAND = {
