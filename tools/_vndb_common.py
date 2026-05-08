@@ -9,7 +9,7 @@ import aiohttp
 
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:8787"
-MAX_CONTENT_CHARS = 24000
+MAX_CONTENT_CHARS = 50000
 
 
 def server_url() -> str:

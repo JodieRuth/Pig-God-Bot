@@ -1042,20 +1042,20 @@ function itemMeta(id, kind, language = 'origin', detail = false) {
   const result = {
     id: item.id,
     vndbid: kind === 'tag' ? `g${item.id}` : `i${item.id}`,
-    title: item.name,
-    description: item.description ?? null,
-    aliases: splitAliases(item.alias),
-    sexual: Boolean(item.sexual),
-    defaultspoil: item.defaultspoil ?? 0,
-    searchable: Boolean(item.searchable),
-    applicable: Boolean(item.applicable),
-    parents: item.parents ?? [],
-    cat: item.cat,
-    group: item.group ?? null,
-    blocked: Boolean(item.blocked),
-    tech: Boolean(item.tech)
+    title: item.name
   };
   if (detail) {
+    result.description = item.description ?? null;
+    result.aliases = splitAliases(item.alias);
+    result.sexual = Boolean(item.sexual);
+    result.defaultspoil = item.defaultspoil ?? 0;
+    result.searchable = Boolean(item.searchable);
+    result.applicable = Boolean(item.applicable);
+    result.parents = item.parents ?? [];
+    result.cat = item.cat;
+    result.group = item.group ?? null;
+    result.blocked = Boolean(item.blocked);
+    result.tech = Boolean(item.tech);
     result.name = metaName(item, language, true);
     result.originalTitle = item.name;
     result.originalDescription = item.description ?? null;
@@ -1069,74 +1069,80 @@ function itemMeta(id, kind, language = 'origin', detail = false) {
 }
 
 function vnTagFields(vn, detail = false) {
-  return vn.tags.map((item) => ({
-    id: item[0],
-    vndbid: `g${item[0]}`,
-    weight: item[1],
-    spoiler: item[2] ?? 0,
-    voteCount: item[4] ?? null,
-    meta: itemMeta(item[0], 'tag', 'origin', detail)
-  }));
+  return vn.tags.map((item) => {
+    const result = {
+      id: item[0],
+      vndbid: `g${item[0]}`,
+      name: itemMeta(item[0], 'tag').title,
+      rating: item[1],
+      spoiler: item[2] ?? 0
+    };
+    if (detail) {
+      result.voteCount = item[4] ?? null;
+      result.meta = itemMeta(item[0], 'tag', 'origin', true);
+    }
+    return result;
+  });
 }
 
 function characterTraitFields(character, detail = false) {
-  return character.traits.map((item) => ({
-    id: item[0],
-    vndbid: `i${item[0]}`,
-    spoiler: item[1] ?? 0,
-    meta: itemMeta(item[0], 'trait', 'origin', detail)
-  }));
+  return character.traits.map((item) => {
+    const result = {
+      id: item[0],
+      vndbid: `i${item[0]}`,
+      name: itemMeta(item[0], 'trait').title,
+      spoiler: item[1] ?? 0
+    };
+    if (detail) result.meta = itemMeta(item[0], 'trait', 'origin', true);
+    return result;
+  });
 }
 
 function slimVn(vn, extra = {}, detail = false) {
-  const aliases = splitAliases(vn.aliases);
-  const tags = vnTagFields(vn, detail);
-  return {
+  const result = {
     id: vn.id,
     vndbid: `v${vn.id}`,
     title: vn.title,
-    name: vn.title,
     original: vn.original,
-    originalTitle: vn.original,
-    aliases,
-    aliasText: vn.aliases,
-    tagIds: tags.map((item) => item.id),
-    tagVndbIds: tags.map((item) => item.vndbid),
-    tags,
+    aliases: splitAliases(vn.aliases),
+    tags: vnTagFields(vn, detail),
     rating: vn.rating,
-    average: vn.average,
     votes: vn.votes,
     image: vn.image,
-    developers: vn.developers,
-    publishers: vn.publishers,
+    developers: vn.developers.map((item) => ({ id: item.id, name: item.name, original: item.original, type: item.type, lang: item.lang })),
     ...extra
   };
+  if (detail) {
+    result.aliasText = vn.aliases;
+    result.average = vn.average;
+    result.publishers = vn.publishers.map((item) => ({ id: item.id, name: item.name, original: item.original, type: item.type, lang: item.lang }));
+  }
+  return result;
 }
 
 function slimCharacter(character, extra = {}, detail = false) {
-  const traits = characterTraitFields(character, detail);
-  return {
+  const result = {
     id: character.id,
     vndbid: `c${character.id}`,
     name: character.name,
     original: character.original,
-    originalName: character.original,
     aliases: splitAliases(character.aliases),
-    traitIds: traits.map((item) => item.id),
-    traitVndbIds: traits.map((item) => item.vndbid),
-    traits,
+    traits: characterTraitFields(character, detail),
     image: character.image,
     sex: character.sex,
     gender: character.gender,
-    blood: character.blood,
     birthday: character.birthday,
-    bust: character.bust,
-    waist: character.waist,
-    hip: character.hip,
     score: character.score,
-    vns: character.vns.map(([id, role, spoiler]) => ({ id, vndbid: `v${id}`, role, spoiler, title: vnById.get(id)?.title ?? null, original: vnById.get(id)?.original ?? null })),
+    vns: character.vns.map(([id, role, spoiler]) => ({ id, vndbid: `v${id}`, role, spoiler, title: vnById.get(id)?.title ?? null })),
     ...extra
   };
+  if (detail) {
+    result.blood = character.blood;
+    result.bust = character.bust;
+    result.waist = character.waist;
+    result.hip = character.hip;
+  }
+  return result;
 }
 
 function exactSearchMatch(value, query) {
@@ -1257,7 +1263,7 @@ function pickBestLocalTarget(input) {
     if (!character) throw new Error(`Character not found: ${raw}`);
     return { type: 'character', id: character.id, local: slimCharacter(character) };
   }
-  const found = searchItems({ action: 'search', mode, name: raw, limit: 1, detail: true }).results?.[0];
+  const found = searchItems({ action: 'search', mode, name: raw, limit: 1, detail: Boolean(input.detail ?? false) }).results?.[0];
   if (!found) throw new Error(`No local search result for: ${raw}`);
   return { type: found.vndbid?.startsWith('c') ? 'character' : 'vn', id: found.id, local: found };
 }
@@ -1306,9 +1312,35 @@ function sameJsonValue(left, right) {
   return stableJson(left) === stableJson(right);
 }
 
+function collectStrings(value, strings = new Set()) {
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    if (normalized) strings.add(normalized);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectStrings(item, strings);
+  } else if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) collectStrings(item, strings);
+  }
+  return strings;
+}
+
+function pruneDuplicateStrings(value, remoteStrings) {
+  if (typeof value === 'string') return remoteStrings.has(value.trim()) ? undefined : value;
+  if (Array.isArray(value)) {
+    const items = value.map((item) => pruneDuplicateStrings(item, remoteStrings)).filter((item) => item !== undefined);
+    return items.length ? items : undefined;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value).map(([key, item]) => [key, pruneDuplicateStrings(item, remoteStrings)]).filter(([, item]) => item !== undefined);
+    return entries.length ? Object.fromEntries(entries) : undefined;
+  }
+  return value;
+}
+
 function omitDuplicateLocalFields(local, remote) {
   if (!local || typeof local !== 'object' || Array.isArray(local) || !remote || typeof remote !== 'object' || Array.isArray(remote)) return local;
-  return Object.fromEntries(Object.entries(local).filter(([key, value]) => !(Object.hasOwn(remote, key) && sameJsonValue(value, remote[key]))));
+  const remoteStrings = collectStrings(remote);
+  return Object.fromEntries(Object.entries(local).map(([key, value]) => [key, Object.hasOwn(remote, key) && sameJsonValue(value, remote[key]) ? undefined : pruneDuplicateStrings(value, remoteStrings)]).filter(([, value]) => value !== undefined));
 }
 
 async function vndbApiDetail(input) {
@@ -1316,8 +1348,8 @@ async function vndbApiDetail(input) {
   const downloadImage = Boolean(input.downloadImage ?? input.image ?? true);
   const localImageUrl = target.type === 'vn' ? vndbImageUrlFromId(target.local.image) : null;
   const fields = target.type === 'vn'
-    ? input.fields ?? 'id,title,alttitle,aliases,olang,released,languages,platforms,image.url,image.sexual,image.violence,image.votecount,image.dims,length,length_minutes,description,rating,votecount,tags.rating,tags.spoiler,tags.lie,tags.id,tags.name,tags.description,developers.id,developers.name,relations.id,relations.relation,relations.title'
-    : input.fields ?? 'id,name,original,aliases,description,image.url,image.sexual,image.violence,image.votecount,image.dims,sex,blood_type,height,weight,bust,waist,hips,birthday,age,traits.id,traits.name,traits.description,traits.spoiler,traits.lie,vns.id,vns.title,vns.role,vns.spoiler';
+    ? input.fields ?? 'id,title,alttitle,aliases,olang,released,languages,platforms,image.url,image.sexual,image.violence,image.votecount,image.dims,length,length_minutes,description,rating,votecount,tags.rating,tags.spoiler,tags.lie,tags.id,tags.name,developers.id,developers.name,relations.id,relations.relation,relations.title'
+    : input.fields ?? 'id,name,original,aliases,description,image.url,image.sexual,image.violence,image.votecount,image.dims,sex,blood_type,height,weight,bust,waist,hips,birthday,age,traits.id,traits.name,traits.spoiler,traits.lie,vns.id,vns.title,vns.role,vns.spoiler';
   const endpoint = target.type === 'vn' ? 'vn' : 'character';
   const api = await postJson(`${VNDB_API_BASE}/${endpoint}`, {
     filters: ['id', '=', target.type === 'vn' ? `v${target.id}` : `c${target.id}`],

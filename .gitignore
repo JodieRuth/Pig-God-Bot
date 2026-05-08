@@ -16,6 +16,7 @@ logs/
 *.log
 runtime_state.json
 outputs/
+tools/data/
 command/quote/img/
 command/quote/data.json
 command/zhubi/data.json
