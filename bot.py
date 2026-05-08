@@ -2308,15 +2308,19 @@ async def connect_onebot_ws(headers: dict[str, str]):
         return await websockets.connect(ONEBOT_WS, extra_headers=headers)
 
 
-async def _handle_pending_update() -> None:
+async def _load_pending_update() -> dict[str, Any] | None:
     pending_file = ROOT / ".pending_update.json"
     if not pending_file.exists():
-        return
+        return None
     try:
         data = json.loads(pending_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         pending_file.unlink(missing_ok=True)
-        return
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def send_pending_update_message(data: dict[str, Any], text: str, remove_pending_file: bool = False) -> None:
     event = data.get("event", {})
     message_type = event.get("message_type")
     user_id = event.get("user_id")
@@ -2325,7 +2329,7 @@ async def _handle_pending_update() -> None:
     token = os.getenv("ONEBOT_TOKEN", "local_onebot_token")
     http_url = os.getenv("ONEBOT_HTTP", "http://127.0.0.1:3000").rstrip("/")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    message = [{"type": "text", "data": {"text": "更新完成，bot 已重新上线。"}}]
+    message = [{"type": "text", "data": {"text": text}}]
     if message_type == "group" and group_id:
         url = f"{http_url}/send_group_msg"
         payload = {"group_id": group_id, "message": message}
@@ -2342,7 +2346,21 @@ async def _handle_pending_update() -> None:
                     console_log("Pending update notification sent successfully")
     except Exception as exc:
         console_log(f"Pending update notification error: {exc}")
-    pending_file.unlink(missing_ok=True)
+    if remove_pending_file:
+        (ROOT / ".pending_update.json").unlink(missing_ok=True)
+
+
+async def report_startup_service_statuses(data: dict[str, Any], searxng_task: asyncio.Task[tuple[bool, str]], vndb_task: asyncio.Task[tuple[bool, str]]) -> None:
+    results = await asyncio.gather(searxng_task, vndb_task, return_exceptions=True)
+    lines = ["工具服务初始化状态："]
+    names = ["SearXNG web_search", "VNDB JSON Server"]
+    for name, result in zip(names, results):
+        if isinstance(result, Exception):
+            lines.append(f"{name}：失败，{exception_detail(result)}")
+        else:
+            ok, detail = result
+            lines.append(f"{name}：{'成功' if ok else '失败'}，{detail}")
+    await send_pending_update_message(data, "\n".join(lines))
 
 
 async def searxng_server_is_healthy() -> bool:
@@ -2478,21 +2496,23 @@ async def install_searxng_dependencies() -> str:
     return ""
 
 
-async def start_searxng_server() -> None:
+async def start_searxng_server() -> tuple[bool, str]:
     global SEARXNG_PROCESS
     if not SEARXNG_AUTO_START:
         log("SearXNG auto-start disabled")
-        return
+        return True, "自动启动已关闭"
     if await searxng_server_is_healthy():
+        detail = f"已可用：{SEARXNG_URL}"
         log(f"SearXNG already healthy: {SEARXNG_URL}")
-        return
+        return True, detail
     install_error = await install_searxng_dependencies()
     if install_error:
         log(f"SearXNG dependency check failed: {install_error}")
-        return
+        return False, install_error
     if not SEARXNG_SETTINGS_PATH.exists():
+        detail = f"settings missing: {SEARXNG_SETTINGS_PATH}"
         log(f"SearXNG settings missing: {SEARXNG_SETTINGS_PATH}")
-        return
+        return False, detail
     env = os.environ.copy()
     env["SEARXNG_SETTINGS_PATH"] = str(SEARXNG_SETTINGS_PATH)
     proxy = apply_proxy_env(env)
@@ -2511,8 +2531,9 @@ async def start_searxng_server() -> None:
             stderr=asyncio.subprocess.PIPE,
         )
     except Exception as exc:
-        log(f"SearXNG start failed: {exception_detail(exc)}")
-        return
+        detail = exception_detail(exc)
+        log(f"SearXNG start failed: {detail}")
+        return False, detail
     for stream, name in ((SEARXNG_PROCESS.stdout, "stdout"), (SEARXNG_PROCESS.stderr, "stderr")):
         task = asyncio.create_task(pipe_searxng_server_log(stream, name))
         SEARXNG_LOG_TASKS.add(task)
@@ -2521,19 +2542,21 @@ async def start_searxng_server() -> None:
         if await searxng_server_is_healthy():
             if SEARXNG_PROCESS.returncode is None:
                 log(f"SearXNG started: {SEARXNG_URL}")
+                return True, f"已启动：{SEARXNG_URL}"
             else:
                 log(f"SearXNG available after spawned process exited: {SEARXNG_URL}")
-            return
+                return True, f"已可用：{SEARXNG_URL}"
         if SEARXNG_PROCESS.returncode is not None:
             log(f"SearXNG exited early: {SEARXNG_PROCESS.returncode}; rechecking existing server")
             for _ in range(5):
                 if await searxng_server_is_healthy():
                     log(f"SearXNG already available: {SEARXNG_URL}")
-                    return
+                    return True, f"已可用：{SEARXNG_URL}"
                 await asyncio.sleep(1)
-            return
+            return False, f"进程提前退出：{SEARXNG_PROCESS.returncode}"
         await asyncio.sleep(1)
     log(f"SearXNG start timed out: {SEARXNG_URL}")
+    return False, f"启动超时：{SEARXNG_URL}"
 
 
 async def stop_searxng_server() -> None:
@@ -2578,17 +2601,18 @@ async def pipe_vndb_json_server_log(stream: asyncio.StreamReader | None, name: s
         log(f"VNDB JSON Server {name}: {line.decode('utf-8', errors='replace').rstrip()}")
 
 
-async def start_vndb_json_server() -> None:
+async def start_vndb_json_server() -> tuple[bool, str]:
     global VNDB_JSON_SERVER_PROCESS
     if not VNDB_JSON_SERVER_AUTO_START:
         log("VNDB JSON Server auto-start disabled")
-        return
+        return True, "自动启动已关闭"
     if not VNDB_SERVER_SCRIPT.exists():
+        detail = f"script missing: {VNDB_SERVER_SCRIPT}"
         log(f"VNDB JSON Server script missing: {VNDB_SERVER_SCRIPT}")
-        return
+        return False, detail
     if await vndb_json_server_is_healthy():
         log(f"VNDB JSON Server already healthy: {VNDB_JSON_SERVER_URL}")
-        return
+        return True, f"已可用：{VNDB_JSON_SERVER_URL}"
     try:
         VNDB_JSON_SERVER_PROCESS = await asyncio.create_subprocess_exec(
             VNDB_NODE_BIN,
@@ -2598,8 +2622,9 @@ async def start_vndb_json_server() -> None:
             stderr=asyncio.subprocess.PIPE,
         )
     except Exception as exc:
-        log(f"VNDB JSON Server start failed: {exception_detail(exc)}")
-        return
+        detail = exception_detail(exc)
+        log(f"VNDB JSON Server start failed: {detail}")
+        return False, detail
     for stream, name in ((VNDB_JSON_SERVER_PROCESS.stdout, "stdout"), (VNDB_JSON_SERVER_PROCESS.stderr, "stderr")):
         task = asyncio.create_task(pipe_vndb_json_server_log(stream, name))
         VNDB_JSON_SERVER_LOG_TASKS.add(task)
@@ -2608,19 +2633,21 @@ async def start_vndb_json_server() -> None:
         if await vndb_json_server_is_healthy():
             if VNDB_JSON_SERVER_PROCESS.returncode is None:
                 log(f"VNDB JSON Server started: {VNDB_JSON_SERVER_URL}")
+                return True, f"已启动：{VNDB_JSON_SERVER_URL}"
             else:
                 log(f"VNDB JSON Server available after spawned process exited: {VNDB_JSON_SERVER_URL}")
-            return
+                return True, f"已可用：{VNDB_JSON_SERVER_URL}"
         if VNDB_JSON_SERVER_PROCESS.returncode is not None:
             log(f"VNDB JSON Server exited early: {VNDB_JSON_SERVER_PROCESS.returncode}; rechecking existing server")
             for _ in range(5):
                 if await vndb_json_server_is_healthy():
                     log(f"VNDB JSON Server already available: {VNDB_JSON_SERVER_URL}")
-                    return
+                    return True, f"已可用：{VNDB_JSON_SERVER_URL}"
                 await asyncio.sleep(1)
-            return
+            return False, f"进程提前退出：{VNDB_JSON_SERVER_PROCESS.returncode}"
         await asyncio.sleep(1)
     log(f"VNDB JSON Server start timed out: {VNDB_JSON_SERVER_URL}")
+    return False, f"启动超时：{VNDB_JSON_SERVER_URL}"
 
 
 async def stop_vndb_json_server() -> None:
@@ -2635,18 +2662,24 @@ async def stop_vndb_json_server() -> None:
 
 
 async def main() -> None:
-    await _handle_pending_update()
-    await start_searxng_server()
-    await start_vndb_json_server()
+    pending_update = await _load_pending_update()
+    searxng_task = asyncio.create_task(start_searxng_server())
+    vndb_task = asyncio.create_task(start_vndb_json_server())
     if "zhubi_idle_tick" not in jobs:
         jobs["zhubi_idle_tick"] = asyncio.create_task(zhubi_idle_tick_loop())
     log(f"Connecting to {ONEBOT_WS}")
+    pending_update_reported = False
+    service_status_report_task: asyncio.Task[None] | None = None
     try:
         while True:
             try:
                 headers = auth_headers()
                 async with await connect_onebot_ws(headers) as ws:
                     log("Connected. Waiting for QQ events.")
+                    if pending_update and not pending_update_reported:
+                        await send_pending_update_message(pending_update, "更新完成，bot 已连接 OneBot，当前可响应消息。", remove_pending_file=True)
+                        pending_update_reported = True
+                        service_status_report_task = asyncio.create_task(report_startup_service_statuses(pending_update, searxng_task, vndb_task))
                     async for raw in ws:
                         try:
                             event = json.loads(raw)
@@ -2661,6 +2694,8 @@ async def main() -> None:
                 log(f"ws disconnected: {exc}; reconnecting in 5s")
                 await asyncio.sleep(5)
     finally:
+        if service_status_report_task is not None and not service_status_report_task.done():
+            service_status_report_task.cancel()
         await stop_vndb_json_server()
         await stop_searxng_server()
 
