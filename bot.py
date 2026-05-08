@@ -1230,6 +1230,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                                 return {"type": "answered_by_tool", "text": ""}
                             messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
                         log_json("Tool execution result", {"tool": tool_name, "result": result})
+                    continue
                 reply_text = message.get("content") or ""
                 log(f"LLM reply parsed: {reply_text[:500]}")
                 return {"type": "text", "text": reply_text}
