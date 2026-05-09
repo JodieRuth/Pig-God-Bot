@@ -51,7 +51,16 @@ def clean_pending(data: dict[str, Any]) -> None:
     store = pending_store(data)
     expired = [key for key, value in store.items() if not isinstance(value, dict) or now - float(value.get("time", 0)) > PENDING_TTL]
     for key in expired:
-        store.pop(key, None)
+        delete_pending(data, store, key)
+
+
+def delete_pending(data: dict[str, Any], store: dict[str, Any], key: str) -> None:
+    store.pop(key, None)
+    deleted = data.setdefault("_pvp_pending_deleted", [])
+    if isinstance(deleted, list):
+        deleted.append(key)
+    else:
+        data["_pvp_pending_deleted"] = [key]
 
 
 def user_has_pending(store: dict[str, Any], user_id: str) -> bool:
@@ -182,7 +191,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         pending_amount = int(pending.get("amount", 0))
         target = zhubi.user_data(data, target_id)
         if common.total_holding(target) < pending_amount:
-            store.pop(key, None)
+            delete_pending(data, store, key)
             zhubi.save_data(data)
             await ctx["reply"](event, f"{target_name} 猪币不足，PVP 已取消。")
             return
@@ -199,7 +208,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         common.change_balance(winner, reward)
         mine_state = zhubi.normalize_mine_state(data)
         mine_state["pool"] = int(mine_state.get("pool", 0)) + pool_amount
-        store.pop(key, None)
+        delete_pending(data, store, key)
         zhubi.save_data(data)
         await ctx["reply"](event, f"PVP 开始！{challenger_name} 投入 {common.format_amount(amount)}，{target_name} 投入 {common.format_amount(pending_amount)}。{challenger_name} 胜率 {challenger_probability:.1%}，{target_name} 胜率 {1 - challenger_probability:.1%}。胜者：{winner_name}，获得败者投入的 75%：{common.format_amount(reward)}；败者：{loser_name}，损失 {common.format_amount(loser_amount)}；进入猪池：{common.format_amount(pool_amount)}。")
         return

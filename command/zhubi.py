@@ -173,6 +173,25 @@ def load_data() -> dict[str, Any]:
 
 def save_data(data: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    deleted_pending = set(str(item) for item in data.pop("_pvp_pending_deleted", []))
+    current_pending: dict[str, Any] = {}
+    if DATA_FILE.exists():
+        try:
+            with DATA_FILE.open("r", encoding="utf-8") as f:
+                current = json.load(f)
+            if isinstance(current, dict) and isinstance(current.get("pvp_pending"), dict):
+                current_pending = current["pvp_pending"]
+        except (json.JSONDecodeError, OSError):
+            current_pending = {}
+    if current_pending:
+        pending = data.setdefault("pvp_pending", {})
+        if isinstance(pending, dict):
+            for key, value in current_pending.items():
+                if key not in deleted_pending and key not in pending:
+                    pending[key] = value
+    if deleted_pending and isinstance(data.get("pvp_pending"), dict):
+        for key in deleted_pending:
+            data["pvp_pending"].pop(key, None)
     tmp = DATA_FILE.with_name(f"{DATA_FILE.name}.{os.getpid()}.tmp")
     try:
         with tmp.open("w", encoding="utf-8") as f:

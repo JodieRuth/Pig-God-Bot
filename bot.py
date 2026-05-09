@@ -1354,6 +1354,69 @@ def find_image_generation_result(value: Any) -> str | None:
     return None
 
 
+def summarize_image_error_payload(value: Any) -> str:
+    entries: list[str] = []
+    seen: set[str] = set()
+
+    def add_entry(payload: dict[str, Any], container: dict[str, Any] | None = None) -> None:
+        parts: list[str] = []
+        event_type = str((container or {}).get("type") or payload.get("type") or "").strip()
+        code = str(payload.get("code") or "").strip()
+        message = str(payload.get("message") or "").strip()
+        param = payload.get("param")
+        response_id = str((container or {}).get("id") or payload.get("id") or "").strip()
+        if event_type:
+            parts.append(f"type={event_type}")
+        if code:
+            parts.append(f"code={code}")
+        if message:
+            parts.append(f"message={sanitize_error_detail(message, 500)}")
+            request_match = re.search(r"request ID\s+([A-Za-z0-9_-]+)", message, flags=re.IGNORECASE)
+            if request_match:
+                parts.append(f"request_id={request_match.group(1)}")
+            safety_match = re.search(r"safety_violations=([^\.\s]+)", message)
+            if safety_match:
+                parts.append(f"safety_violations={safety_match.group(1)}")
+        if param is not None:
+            parts.append(f"param={sanitize_error_detail(param, 120)}")
+        if response_id:
+            parts.append(f"id={response_id}")
+        text = "；".join(parts)
+        if text and text not in seen:
+            seen.add(text)
+            entries.append(text)
+
+    def walk(item: Any, container: dict[str, Any] | None = None) -> None:
+        if isinstance(item, dict):
+            error = item.get("error")
+            if isinstance(error, dict):
+                add_entry(error, item)
+            elif any(key in item for key in ("code", "message")):
+                add_entry(item, container)
+            for value in item.values():
+                walk(value, item)
+        elif isinstance(item, list):
+            for value in item:
+                walk(value, container)
+
+    walk(value)
+    return " | ".join(entries)
+
+
+def summarize_image_event_brief(event: Any) -> str:
+    if not isinstance(event, dict):
+        return sanitize_error_detail(event, 200)
+    error_text = summarize_image_error_payload(event)
+    if error_text:
+        return error_text
+    parts: list[str] = []
+    for key in ("type", "status", "id", "item_id"):
+        value = event.get(key)
+        if value:
+            parts.append(f"{key}={sanitize_error_detail(value, 120)}")
+    return "；".join(parts) if parts else sanitize_error_detail(compact_payload(event), 300)
+
+
 def summarize_sse_event(event: Any) -> str:
     if not isinstance(event, dict):
         return sanitize_error_detail(event, 200)
@@ -1428,9 +1491,9 @@ async def parse_responses_image_sse(resp: aiohttp.ClientResponse) -> str:
         event_type = str(event.get("type") or "")
         summary = summarize_sse_event(event)
         log(f"Image Responses SSE event: {summary}")
-        recent_events.append(summary)
+        recent_events.append(summarize_image_event_brief(event))
         if any(keyword in event_type.lower() for keyword in ("error", "failed", "rejected", "abort")) or isinstance(event.get("error"), dict):
-            error_events.append(summary)
+            error_events.append(summarize_image_event_brief(event))
         image_data = find_image_generation_result(event)
         if image_data and "partial" not in event_type:
             final_image = image_data
@@ -1471,8 +1534,14 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
             log(f"Image Responses status={resp.status} content_type={content_type}")
             if resp.status >= 400:
                 body = await resp.read()
-                body_text = body[:1000].decode("utf-8", errors="replace")
-                raise RuntimeError(f"HTTP {resp.status}: {sanitize_error_detail(body_text)}")
+                body_text = body[:4000].decode("utf-8", errors="replace")
+                try:
+                    error_data = json.loads(body_text)
+                except json.JSONDecodeError:
+                    error_data = None
+                brief = summarize_image_error_payload(error_data) if error_data is not None else ""
+                detail = brief or sanitize_error_detail(body_text)
+                raise RuntimeError(f"HTTP {resp.status}: {detail}")
 
             if "event-stream" in content_type:
                 image_b64 = await parse_responses_image_sse(resp)
@@ -1483,7 +1552,9 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
                 data = json.loads(body_text)
                 image_b64 = find_image_generation_result(data)
                 if not image_b64:
-                    raise RuntimeError(f"响应没有返回 image_generation_call.result，响应：{sanitize_error_detail(data)}")
+                    brief = summarize_image_error_payload(data)
+                    detail = f"响应没有返回 image_generation_call.result：{brief}" if brief else f"响应没有返回 image_generation_call.result，响应：{sanitize_error_detail(data)}"
+                    raise RuntimeError(detail)
 
             target = OUTPUT_DIR / f"{uuid.uuid4().hex}.png"
             target.write_bytes(base64.b64decode(image_b64))
@@ -1517,6 +1588,14 @@ def select_tool_images(images: list[dict[str, Any]], image_indexes: list[Any]) -
     return selected
 
 
+def image_exception_detail(exc: BaseException) -> str:
+    detail = exception_detail(exc)
+    for prefix in ("RuntimeError: ", "Exception: "):
+        if detail.startswith(prefix):
+            return detail[len(prefix):]
+    return detail
+
+
 async def run_image_job(event: dict[str, Any], job_id: str, prompt: str, context_texts: list[str], images: list[dict[str, Any]]) -> None:
     start = time.monotonic()
     log(f"Image job started: {job_id} prompt={prompt!r} images={[image_path(record).name for record in images]}")
@@ -1535,8 +1614,8 @@ async def run_image_job(event: dict[str, Any], job_id: str, prompt: str, context
         raise
     except Exception as exc:
         elapsed = format_elapsed(time.monotonic() - start)
-        detail = exception_detail(exc)
-        log(f"Image job failed: {job_id} elapsed={elapsed} error={detail}")
+        detail = image_exception_detail(exc)
+        log(f"Image job failed: {job_id} elapsed={elapsed} error={exception_detail(exc)}")
         await reply(event, f"任务 {job_id} 失败，用时 {elapsed}：{detail}")
 
 

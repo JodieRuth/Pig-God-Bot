@@ -15,7 +15,6 @@ spec.loader.exec_module(common)
 zhubi = common.zhubi
 
 DAILY_ZHUA_LIMIT = 3
-IDLE_MIN_THRESHOLD = 1000.0
 
 
 def extract_at_target(message: list[dict[str, Any]]) -> int | None:
@@ -79,6 +78,23 @@ def idle_transfer_out(idle: dict[str, Any], amount: float) -> None:
         idle["coins"] = common.truncate_decimal(used_max * common.MAX_UNIT - remaining)
 
 
+def transfer_prefer_idle(from_user: dict[str, Any], to_user: dict[str, Any], amount: float) -> str:
+    from_idle = common.idle_state(from_user)
+    to_idle = common.idle_state(to_user)
+    idle_total = common.idle_total_coins(from_idle)
+    if idle_total >= amount:
+        idle_transfer_out(from_idle, float(amount))
+        to_idle["coins"] = common.truncate_decimal(float(to_idle.get("coins", 0.0)) + float(amount))
+        common.normalize_idle_units(from_idle)
+        common.normalize_idle_units(to_idle)
+        return "idle 钱包"
+    spent = common.spend_amount(from_user, float(amount))
+    if spent is None:
+        return ""
+    common.change_balance(to_user, amount)
+    return "总资产"
+
+
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if await handle_add(event, arg, ctx):
         return
@@ -113,77 +129,51 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
     thief_idle = common.idle_state(thief)
     target_idle = common.idle_state(target)
+    target_total = common.total_holding(target)
     target_idle_total = common.idle_total_coins(target_idle)
 
-    use_main = target_idle_total < IDLE_MIN_THRESHOLD
-
-    if use_main:
-        target_balance = common.balance_of(target)
-        if target_balance <= 0:
-            zhubi.save_data(data)
-            await ctx["reply"](event, "对方主钱包猪币不足，无法抓取。")
-            return
-        ratio = random.uniform(0.01, 0.20)
-        steal_amount = common.truncate_decimal(target_balance * ratio)
-        if steal_amount <= 0:
-            zhubi.save_data(data)
-            await ctx["reply"](event, "对方主钱包猪币太少，无法抓取。")
-            return
-        reversed_result = random.random() < 0.5
-        source_name = "主钱包"
-    else:
-        ratio = random.uniform(0.01, 0.20)
-        steal_amount = common.truncate_decimal(target_idle_total * ratio)
-        if steal_amount <= 0:
-            zhubi.save_data(data)
-            await ctx["reply"](event, "对方 idle 猪币太少，无法抓取。")
-            return
-        reversed_result = random.random() < 0.5
-        source_name = "idle 钱包"
+    if target_total <= 0:
+        zhubi.save_data(data)
+        await ctx["reply"](event, "对方猪币不足，无法抓取。")
+        return
+    ratio = random.uniform(0.01, 0.20)
+    base_amount = target_idle_total if target_idle_total > 0 else target_total
+    steal_amount = common.truncate_decimal(min(target_total, base_amount * ratio))
+    if steal_amount <= 0:
+        zhubi.save_data(data)
+        await ctx["reply"](event, "对方猪币太少，无法抓取。")
+        return
+    reversed_result = random.random() < 0.5
 
     if reversed_result:
-        if use_main:
-            if common.total_holding(thief) <= 0:
-                zhubi.save_data(data)
-                await ctx["reply"](event, f"偷鸡不成蚀把米！但你的{source_name}不足，无事发生。")
-                return
-            ratio = random.uniform(0.01, 0.20)
-            steal_amount = common.truncate_decimal(common.total_holding(thief) * ratio)
-            common.spend_amount(thief, float(steal_amount))
-            common.change_balance(target, steal_amount)
+        thief_total = common.total_holding(thief)
+        if thief_total <= 0:
             zhubi.save_data(data)
-            remaining = "不限" if is_admin else str(max(0, zhuazhu_available(thief)))
-            await ctx["reply"](event, f"偷鸡不成蚀把米！{common.format_amount(steal_amount)} 从你的{source_name}被反抓到了对方{source_name}。今日剩余抓抓次数：{remaining}。")
+            await ctx["reply"](event, "偷鸡不成蚀把米！但你的猪币不足，无事发生。")
             return
-        else:
-            thief_idle_total = common.idle_total_coins(thief_idle)
-            if thief_idle_total <= 0:
-                zhubi.save_data(data)
-                await ctx["reply"](event, f"偷鸡不成蚀把米！但你的{source_name}不足，无事发生。")
-                return
-            ratio = random.uniform(0.01, 0.20)
-            steal_amount = common.truncate_decimal(thief_idle_total * ratio)
-            idle_transfer_out(thief_idle, float(steal_amount))
-            target_idle["coins"] = common.truncate_decimal(float(target_idle.get("coins", 0.0)) + float(steal_amount))
-            common.normalize_idle_units(thief_idle)
-            common.normalize_idle_units(target_idle)
+        ratio = random.uniform(0.01, 0.20)
+        thief_idle_total = common.idle_total_coins(thief_idle)
+        base_amount = thief_idle_total if thief_idle_total > 0 else thief_total
+        steal_amount = common.truncate_decimal(min(thief_total, base_amount * ratio))
+        if steal_amount <= 0:
             zhubi.save_data(data)
-            remaining = "不限" if is_admin else str(max(0, zhuazhu_available(thief)))
-            await ctx["reply"](event, f"偷鸡不成蚀把米！{common.format_amount(steal_amount)} 从你的{source_name}被反抓到了对方{source_name}。今日剩余抓抓次数：{remaining}。")
+            await ctx["reply"](event, "偷鸡不成蚀把米！但你的猪币太少，无事发生。")
             return
-
-    if use_main:
-        common.spend_amount(target, float(steal_amount))
-        common.change_balance(thief, steal_amount)
+        source_name = transfer_prefer_idle(thief, target, steal_amount)
+        if not source_name:
+            zhubi.save_data(data)
+            await ctx["reply"](event, "偷鸡不成蚀把米！但你的猪币不足，无事发生。")
+            return
         zhubi.save_data(data)
         remaining = "不限" if is_admin else str(max(0, zhuazhu_available(thief)))
-        await ctx["reply"](event, f"抓取成功！{common.format_amount(steal_amount)} 猪币已从对方{source_name}转入你的{source_name}。今日剩余抓抓次数：{remaining}。")
+        await ctx["reply"](event, f"偷鸡不成蚀把米！{common.format_amount(steal_amount)} 从你的{source_name}被反抓到了对方{source_name}。今日剩余抓抓次数：{remaining}。")
         return
 
-    idle_transfer_out(target_idle, float(steal_amount))
-    thief_idle["coins"] = common.truncate_decimal(float(thief_idle.get("coins", 0.0)) + float(steal_amount))
-    common.normalize_idle_units(target_idle)
-    common.normalize_idle_units(thief_idle)
+    source_name = transfer_prefer_idle(target, thief, steal_amount)
+    if not source_name:
+        zhubi.save_data(data)
+        await ctx["reply"](event, "对方猪币不足，无法抓取。")
+        return
     zhubi.save_data(data)
     remaining = "不限" if is_admin else str(max(0, zhuazhu_available(thief)))
     await ctx["reply"](event, f"抓取成功！{common.format_amount(steal_amount)} 猪币已从对方{source_name}转入你的{source_name}。今日剩余抓抓次数：{remaining}。")
