@@ -3440,7 +3440,7 @@ def format_result(uid: int, found: list[dict[str, Any]], errors: list[str], chec
     if errors:
         lines.append("")
         lines.append("部分数据源查询异常：" + "；".join(errors[:3]))
-        lines.append("如果 B站接口返回 -101/412，可在 .env 配置 BILIBILI_COOKIE，或先用 WebView2/Edge/Chrome Cookie 来源登录。")
+        lines.append("需要 WebView2/Edge/Chrome Cookie 来源登录。")
     lines.append(f"规则数：{checker_count}，数据源：关注列表、空间动态、历史评论")
     return "\n".join(lines)
 
