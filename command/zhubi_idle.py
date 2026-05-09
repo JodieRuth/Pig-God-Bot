@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,25 @@ if spec is None or spec.loader is None:
 common = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(common)
 zhubi = common.zhubi
+
+HOURLY_LIMIT = 3
+HOURLY_WINDOW_SECONDS = 3600
+hourly_usage: dict[str, deque[float]] = defaultdict(deque)
+
+
+def check_hourly_limit(event: dict[str, Any], ctx: dict[str, Any]) -> tuple[bool, int]:
+    if ctx["is_admin_event"](event):
+        return True, HOURLY_LIMIT
+    user_id = str(event.get("user_id", 0))
+    now = time.time()
+    bucket = hourly_usage[user_id]
+    while bucket and now - bucket[0] >= HOURLY_WINDOW_SECONDS:
+        bucket.popleft()
+    if len(bucket) >= HOURLY_LIMIT:
+        remaining = max(1, int(HOURLY_WINDOW_SECONDS - (now - bucket[0])))
+        return False, remaining
+    bucket.append(now)
+    return True, HOURLY_LIMIT - len(bucket)
 
 
 def idle_summary(state: dict[str, Any], balance: float) -> str:
@@ -164,6 +185,11 @@ async def handle_remake(event: dict[str, Any], ctx: dict[str, Any]) -> None:
 
 
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
+    allowed, value = check_hourly_limit(event, ctx)
+    if not allowed:
+        minutes, seconds = divmod(value, 60)
+        await ctx["reply"](event, f"/zhubi_idle 每人每小时只能使用 {HOURLY_LIMIT} 次，请 {minutes}分{seconds}秒 后再试。")
+        return
     parts = arg.split()
     if not parts:
         data = zhubi.load_data()

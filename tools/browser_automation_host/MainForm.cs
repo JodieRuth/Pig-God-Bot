@@ -45,18 +45,30 @@ public partial class MainForm : Form
 
     protected override bool ShowWithoutActivation => true;
 
-
     private async Task RunAsync()
     {
         try
         {
             options.Validate();
-            var userDataFolder = Path.Combine(Path.GetTempPath(), "browser_automation_host", Guid.NewGuid().ToString("N"));
+            var userDataFolder = options.ResolveUserDataFolder();
             Directory.CreateDirectory(userDataFolder);
             var environment = await CoreWebView2Environment.CreateAsync(null, userDataFolder);
             await webView.EnsureCoreWebView2Async(environment);
             ConfigureWebView();
-            var result = await RunAnimeTraceAsync();
+            Dictionary<string, object?> result;
+            var task = options.Task.ToLowerInvariant();
+            if (task == "animetrace")
+            {
+                result = await RunAnimeTraceAsync();
+            }
+            else if (task == "bilibili-login")
+            {
+                result = await RunBilibiliLoginAsync(userDataFolder);
+            }
+            else
+            {
+                result = await RunBilibiliCookieAsync(userDataFolder);
+            }
             await WriteResultAsync(result);
             exitCode = 0;
         }
@@ -81,7 +93,7 @@ public partial class MainForm : Form
     {
         var core = webView.CoreWebView2;
         core.Settings.AreDefaultContextMenusEnabled = false;
-        core.Settings.AreDevToolsEnabled = false;
+        core.Settings.AreDevToolsEnabled = options.Visible;
         core.WebResourceResponseReceived += async (_, e) => await OnWebResourceResponseReceivedAsync(e);
     }
 
@@ -98,6 +110,7 @@ public partial class MainForm : Form
         var currentUrl = webView.Source?.ToString() ?? options.Url;
         return new Dictionary<string, object?>
         {
+            ["task"] = options.Task,
             ["title"] = title,
             ["url"] = currentUrl,
             ["image"] = options.Image,
@@ -106,6 +119,82 @@ public partial class MainForm : Form
             ["captured_network"] = capturedNetwork,
             ["search_response"] = searchResponse
         };
+    }
+
+    private async Task<Dictionary<string, object?>> RunBilibiliLoginAsync(string userDataFolder)
+    {
+        stopwatch.Restart();
+        var url = string.IsNullOrWhiteSpace(options.Url) || options.Url == "https://ai.animedb.cn/en/" ? options.CookieUrl : options.Url;
+        await NavigateAsync(url);
+        await WaitForPageReadyAsync();
+        await Task.Delay(Math.Max(1000, options.WaitMs));
+        var cookies = await GetCookieRecordsAsync(options.CookieUrl);
+        var cookieHeader = BuildCookieHeader(cookies);
+        return new Dictionary<string, object?>
+        {
+            ["task"] = options.Task,
+            ["url"] = webView.Source?.ToString() ?? url,
+            ["cookie_url"] = options.CookieUrl,
+            ["cookie_source"] = options.CookieSource,
+            ["user_data_folder"] = userDataFolder,
+            ["profile_directory"] = options.ProfileDirectory,
+            ["cookie_count"] = cookies.Count,
+            ["has_sessdata"] = cookies.Any(x => string.Equals(Convert.ToString(x["name"]), "SESSDATA", StringComparison.OrdinalIgnoreCase)),
+            ["cookie"] = cookieHeader,
+            ["cookies"] = cookies,
+            ["waited_seconds"] = stopwatch.Elapsed.TotalSeconds
+        };
+    }
+
+    private async Task<Dictionary<string, object?>> RunBilibiliCookieAsync(string userDataFolder)
+    {
+        stopwatch.Restart();
+        await NavigateAsync(options.CookieUrl);
+        await WaitForPageReadyAsync();
+        await Task.Delay(Math.Max(500, Math.Min(options.WaitMs, 5000)));
+        var cookies = await GetCookieRecordsAsync(options.CookieUrl);
+        var cookieHeader = BuildCookieHeader(cookies);
+        return new Dictionary<string, object?>
+        {
+            ["task"] = options.Task,
+            ["url"] = webView.Source?.ToString() ?? options.CookieUrl,
+            ["cookie_url"] = options.CookieUrl,
+            ["cookie_source"] = options.CookieSource,
+            ["user_data_folder"] = userDataFolder,
+            ["profile_directory"] = options.ProfileDirectory,
+            ["cookie_count"] = cookies.Count,
+            ["has_sessdata"] = cookies.Any(x => string.Equals(Convert.ToString(x["name"]), "SESSDATA", StringComparison.OrdinalIgnoreCase)),
+            ["cookie"] = cookieHeader,
+            ["cookies"] = cookies,
+            ["waited_seconds"] = stopwatch.Elapsed.TotalSeconds
+        };
+    }
+
+    private async Task<List<Dictionary<string, object?>>> GetCookieRecordsAsync(string url)
+    {
+        var cookies = await webView.CoreWebView2.CookieManager.GetCookiesAsync(url);
+        return cookies
+            .OrderBy(cookie => cookie.Domain)
+            .ThenBy(cookie => cookie.Name)
+            .Select(cookie => new Dictionary<string, object?>
+            {
+                ["name"] = cookie.Name,
+                ["value"] = cookie.Value,
+                ["domain"] = cookie.Domain,
+                ["path"] = cookie.Path,
+                ["expires"] = cookie.Expires.ToString("O"),
+                ["is_http_only"] = cookie.IsHttpOnly,
+                ["is_secure"] = cookie.IsSecure,
+                ["same_site"] = cookie.SameSite.ToString()
+            })
+            .ToList();
+    }
+
+    private static string BuildCookieHeader(List<Dictionary<string, object?>> cookies)
+    {
+        return string.Join("; ", cookies
+            .Where(cookie => !string.IsNullOrWhiteSpace(Convert.ToString(cookie["name"])))
+            .Select(cookie => $"{cookie["name"]}={cookie["value"]}"));
     }
 
     private Task NavigateAsync(string url)
@@ -206,7 +295,7 @@ public partial class MainForm : Form
         {
             return;
         }
-        capturedNetwork.Add(["RESP " + e.Response.StatusCode, uri, null]);
+        capturedNetwork.Add(["RESP " + e.Response.StatusCode, uri, ""]);
         if (e.Request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase) && uri.TrimEnd('/').EndsWith("/v1/search", StringComparison.OrdinalIgnoreCase) && searchResponse["text"] is null)
         {
             string? text = null;
