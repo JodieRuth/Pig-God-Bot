@@ -1756,7 +1756,7 @@ async def write_pending_restart_message(event: dict[str, Any], message: str) -> 
     (ROOT / ".pending_update.json").write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
 
 
-async def reboot_process(event: dict[str, Any] | None = None, done_message: str = "重启完成，bot 已重新上线") -> None:
+async def reboot_process(event: dict[str, Any] | None = None, done_message: str = "重启完成，bot 已重新上线。") -> None:
     log("Reboot requested, replacing current process")
     if event is not None:
         await write_pending_restart_message(event, done_message)
