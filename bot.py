@@ -437,10 +437,35 @@ LLM_API_KEY = active_api_config("llm")["key"]
 IMAGE_API_URL = active_api_config("image")["url"]
 IMAGE_API_KEY = active_api_config("image")["key"]
 
+class RpmLimiter:
+    def __init__(self, rpm: int):
+        self.rpm = rpm
+        self._window = 60.0
+        self._timestamps: deque[float] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            while True:
+                now = time.time()
+                while self._timestamps and self._timestamps[0] <= now - self._window:
+                    self._timestamps.popleft()
+                if len(self._timestamps) < self.rpm:
+                    self._timestamps.append(now)
+                    return
+                wait_until = self._timestamps[0] + self._window
+                sleep_time = wait_until - now
+                if sleep_time > 0:
+                    log(f"LLM RPM limit reached ({len(self._timestamps)}/{self.rpm}), waiting {sleep_time:.1f}s")
+                    await asyncio.sleep(sleep_time)
+
+
 MAX_CONTEXT_MESSAGES = 30
 MAX_CONTEXT_AGE_SECONDS = 30 * 60
 MAX_CONTEXT_IMAGES = 10
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+LLM_MAX_RPM = int(os.getenv("LLM_MAX_RPM", "30"))
+LLM_RPM_LIMITER = RpmLimiter(LLM_MAX_RPM)
 DEBUG_LOG = os.getenv("DEBUG_LOG", "1") != "0"
 
 def prompt_value(key: str, scope_key: str = "") -> str:
@@ -1219,53 +1244,54 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             "tool_choice": "auto",
         }
         log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto"}, "headers": headers})
+        await LLM_RPM_LIMITER.acquire()
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.post(llm_url, json=payload, timeout=600) as resp:
                 text = await resp.text()
-                log(f"LLM response status={resp.status} body={text[:1000]}")
-                if resp.status >= 400:
-                    raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
-                data = json.loads(text)
-                message = data["choices"][0]["message"]
-                tool_calls = message.get("tool_calls") or []
-                if tool_calls:
-                    log_json("LLM tool calls", tool_calls)
-                    assistant_message = {"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls}
-                    messages.append(assistant_message)
-                    for tool_call in tool_calls:
-                        function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
-                        tool_name = str(function.get("name") or "").strip().lower()
-                        raw_args = function.get("arguments") or "{}"
+        log(f"LLM response status={resp.status} body={text[:1000]}")
+        if resp.status >= 400:
+            raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
+        data = json.loads(text)
+        message = data["choices"][0]["message"]
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            log_json("LLM tool calls", tool_calls)
+            assistant_message = {"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls}
+            messages.append(assistant_message)
+            for tool_call in tool_calls:
+                function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
+                tool_name = str(function.get("name") or "").strip().lower()
+                raw_args = function.get("arguments") or "{}"
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except json.JSONDecodeError as exc:
+                    args = {}
+                    result = {"ok": False, "content": f"工具调用失败：参数不是有效 JSON：{sanitize_error_detail(str(exc))}"}
+                else:
+                    executor = tool_lookup.get(tool_name)
+                    if not executor:
+                        result = {"ok": False, "content": f"工具调用失败：未找到工具 {tool_name or 'unknown'}"}
+                    else:
                         try:
-                            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                        except json.JSONDecodeError as exc:
-                            args = {}
-                            result = {"ok": False, "content": f"工具调用失败：参数不是有效 JSON：{sanitize_error_detail(str(exc))}"}
-                        else:
-                            executor = tool_lookup.get(tool_name)
-                            if not executor:
-                                result = {"ok": False, "content": f"工具调用失败：未找到工具 {tool_name or 'unknown'}"}
-                            else:
-                                try:
-                                    result = await executor(args if isinstance(args, dict) else {}, tool_runtime, command_context())
-                                except Exception as exc:
-                                    result = {"ok": False, "content": f"工具调用失败：{exception_detail(exc)}"}
-                        tool_result_text = str(result.get("content") or "")
-                        if not tool_result_text:
-                            tool_result_text = json.dumps({"ok": bool(result.get("ok")), "error": result.get("error") or "工具没有返回内容"}, ensure_ascii=False)
-                        tool_call_id = str(tool_call.get("id") or uuid.uuid4().hex)
-                        if result.get("answered") and result.get("ok"):
-                            log_json("Tool execution result", {"tool": tool_name, "result": result})
-                            return {"type": "answered_by_tool", "text": ""}
-                        if tool_name in terminal_tool_names and result.get("ok"):
-                            log_json("Tool execution result", {"tool": tool_name, "result": result})
-                            return {"type": "answered_by_tool", "text": ""}
-                        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
-                        log_json("Tool execution result", {"tool": tool_name, "result": result})
-                    continue
-                reply_text = message.get("content") or ""
-                log(f"LLM reply parsed: {reply_text[:500]}")
-                return {"type": "text", "text": reply_text}
+                            result = await executor(args if isinstance(args, dict) else {}, tool_runtime, command_context())
+                        except Exception as exc:
+                            result = {"ok": False, "content": f"工具调用失败：{exception_detail(exc)}"}
+                tool_result_text = str(result.get("content") or "")
+                if not tool_result_text:
+                    tool_result_text = json.dumps({"ok": bool(result.get("ok")), "error": result.get("error") or "工具没有返回内容"}, ensure_ascii=False)
+                tool_call_id = str(tool_call.get("id") or uuid.uuid4().hex)
+                if result.get("answered") and result.get("ok"):
+                    log_json("Tool execution result", {"tool": tool_name, "result": result})
+                    return {"type": "answered_by_tool", "text": ""}
+                if tool_name in terminal_tool_names and result.get("ok"):
+                    log_json("Tool execution result", {"tool": tool_name, "result": result})
+                    return {"type": "answered_by_tool", "text": ""}
+                messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
+                log_json("Tool execution result", {"tool": tool_name, "result": result})
+            continue
+        reply_text = message.get("content") or ""
+        log(f"LLM reply parsed: {reply_text[:500]}")
+        return {"type": "text", "text": reply_text}
     raise RuntimeError("LLM 工具调用循环超过上限")
 
 
