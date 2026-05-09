@@ -122,6 +122,8 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if target_pos is not None:
         config = configs[target_pos]
         models, error = await fetch_models(config)
+        disabled = ctx["disabled_llm_models"] if kind == "llm" else ctx["disabled_image_models"]
+        models = [m for m in models if m.lower() not in disabled]
         if error:
             await ctx["reply"](event, f"获取 #{target_pos} 模型列表失败：{error}")
             return
@@ -138,6 +140,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     errors: dict[str, str] = {}
     for config in configs:
         models, error = await fetch_models(config)
+        models = [m for m in models if m.lower() not in disabled]
         all_models[config["index"]] = models
         if error:
             errors[config["index"]] = error

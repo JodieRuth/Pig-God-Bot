@@ -347,6 +347,7 @@ async def _run_test(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> lis
 
     async def _check_llm(pos: int, config: dict[str, str]) -> tuple[int, list[str], str, tuple[str, str, str] | None]:
         models, models_error = await fetch_models(config)
+        models = [m for m in models if m.lower() not in ctx["disabled_llm_models"]]
         test_result = None
         if models:
             test_model = openai_model if openai_model in models else models[0]
@@ -356,6 +357,7 @@ async def _run_test(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> lis
 
     async def _check_image(pos: int, config: dict[str, str]) -> tuple[int, list[str], str]:
         models, models_error = await fetch_models(config)
+        models = [m for m in models if m.lower() not in ctx["disabled_image_models"]]
         return (pos, models, models_error)
 
     tasks: list[asyncio.Task[Any]] = []

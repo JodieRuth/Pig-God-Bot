@@ -466,6 +466,8 @@ MAX_CONTEXT_IMAGES = 10
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 LLM_MAX_RPM = int(os.getenv("LLM_MAX_RPM", "30"))
 LLM_RPM_LIMITER = RpmLimiter(LLM_MAX_RPM)
+LLM_DISABLED_MODELS: set[str] = {m.strip().lower() for m in os.getenv("LLM_DISABLED_MODELS", "").split(",") if m.strip()}
+IMAGE_DISABLED_MODELS: set[str] = {m.strip().lower() for m in os.getenv("IMAGE_DISABLED_MODELS", "").split(",") if m.strip()}
 DEBUG_LOG = os.getenv("DEBUG_LOG", "1") != "0"
 
 def prompt_value(key: str, scope_key: str = "") -> str:
@@ -1941,6 +1943,8 @@ def command_context() -> dict[str, Any]:
         "visible_images_for_sender": visible_images_for_sender,
         "recent_context": recent_context,
         "select_llm_images": select_llm_images,
+        "disabled_llm_models": LLM_DISABLED_MODELS,
+        "disabled_image_models": IMAGE_DISABLED_MODELS,
     }
 
 
