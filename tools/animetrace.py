@@ -251,6 +251,40 @@ def collect_candidates(value: Any, limit: int = 5) -> list[str]:
     return candidates
 
 
+def collect_page_candidates(body_text: str, limit: int = 5) -> list[str]:
+    lines = []
+    for raw in str(body_text or "").splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if line and line not in lines:
+            lines.append(line)
+    try:
+        start = lines.index("Search result") + 1
+    except ValueError:
+        return []
+    stop_markers = {"Error Feedback", "📢 New Notice!", "New Notice!", "Notice Board", "Got it", "@2024 AnimeTrace"}
+    noise = {"Click the character name to view related images", "Results will appear here after uploading an image"}
+    useful = []
+    for line in lines[start:]:
+        if line in stop_markers:
+            break
+        if line in noise:
+            continue
+        if line.lower().startswith("error feedback"):
+            break
+        useful.append(line)
+    candidates = []
+    for index in range(0, len(useful) - 1, 2):
+        character = useful[index]
+        work = useful[index + 1]
+        if character and work:
+            item = f"作品：{short_line(work, 40)} 角色：{short_line(character, 40)}"
+            if item not in candidates:
+                candidates.append(item)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def parse_search_json(text: str) -> Any | None:
     if not text:
         return None
@@ -297,6 +331,8 @@ def result_preview(result: dict[str, Any]) -> str:
     search_text = str(search_response.get("text") or "") if isinstance(search_response, dict) else ""
     parsed = parse_search_json(search_text)
     candidates = collect_candidates(parsed) if parsed is not None else []
+    if not candidates:
+        candidates = collect_page_candidates(str(result.get("body_text") or ""))
     if candidates:
         lines = ["可能结果："]
         for index, item in enumerate(candidates, start=1):
