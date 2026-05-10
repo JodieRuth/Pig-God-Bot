@@ -1323,36 +1323,72 @@ def build_image_order_note(images: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def responses_api_url_for_image(image_url: str) -> str:
+def image_api_url_for_mode(image_url: str, has_reference_images: bool) -> str:
     if not image_url:
         return ""
-    if image_url.rstrip("/").endswith("/responses"):
-        return image_url
-    for suffix in ("/images/generations", "/images/edits"):
-        if image_url.endswith(suffix):
-            return image_url.removesuffix(suffix) + "/responses"
-    return image_url.rstrip("/") + "/responses"
+    base_url = image_url.rstrip("/")
+    for suffix in ("/responses", "/images/generations", "/images/edits"):
+        if base_url.endswith(suffix):
+            base_url = base_url.removesuffix(suffix)
+            break
+    endpoint = "/images/edits" if has_reference_images else "/images/generations"
+    return base_url + endpoint
 
 
-def image_generation_tool_options() -> dict[str, Any]:
-    tool: dict[str, Any] = {"type": "image_generation", "partial_images": 1}
+def image_request_options() -> dict[str, Any]:
+    options: dict[str, Any] = {}
     value_map = {
         "IMAGE_SIZE": "size",
         "IMAGE_QUALITY": "quality",
         "IMAGE_BACKGROUND": "background",
-        "IMAGE_FORMAT": "format",
+        "IMAGE_FORMAT": "output_format",
     }
-    for env_key, tool_key in value_map.items():
+    for env_key, request_key in value_map.items():
         value = os.getenv(env_key, "").strip()
         if value:
-            tool[tool_key] = value
+            options[request_key] = value
     compression = os.getenv("IMAGE_COMPRESSION", "").strip()
     if compression:
         try:
-            tool["compression"] = int(compression)
+            options["output_compression"] = int(compression)
         except ValueError:
-            tool["compression"] = compression
-    return tool
+            options["output_compression"] = compression
+    return options
+
+
+def images_edit_payload(prompt: str, image_paths: list[Path], image_model: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": image_model,
+        "prompt": prompt,
+        "images": [{"image_url": image_data_url(path)} for path in image_paths],
+    }
+    payload.update(image_request_options())
+    return payload
+
+
+def images_generation_payload(prompt: str, image_model: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": image_model,
+        "prompt": prompt,
+    }
+    payload.update(image_request_options())
+    return payload
+
+
+def extract_images_api_result(value: Any) -> str | None:
+    result = find_image_generation_result(value)
+    if result:
+        return result
+    if isinstance(value, dict):
+        data = value.get("data")
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                b64_json = item.get("b64_json")
+                if isinstance(b64_json, str) and b64_json.strip():
+                    return b64_json.strip()
+    return None
 
 
 def build_image_generation_input(prompt: str, image_paths: list[Path]) -> list[dict[str, Any]]:
@@ -1547,25 +1583,21 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
     if not image_url:
         raise RuntimeError("未配置生图接口地址")
 
-    request_url = responses_api_url_for_image(image_url)
-    headers = {"Authorization": f"Bearer {image_key}"} if image_key else {}
     image_paths = [image_path(record) for record in images[:MAX_CONTEXT_IMAGES]]
-    payload: dict[str, Any] = {
-        "model": image_model,
-        "input": build_image_generation_input(prompt, image_paths),
-        "tools": [image_generation_tool_options()],
-        "tool_choice": {"type": "image_generation"},
-        "stream": True,
-    }
+    has_reference_images = bool(image_paths)
+    request_url = image_api_url_for_mode(image_url, has_reference_images)
+    headers = {"Authorization": f"Bearer {image_key}"} if image_key else {}
+    payload = images_edit_payload(prompt, image_paths, image_model) if has_reference_images else images_generation_payload(prompt, image_model)
+    mode = "edits" if has_reference_images else "generations"
 
-    log_json("Image Responses request", {"url": request_url, "model": image_model, "prompt": prompt, "images": [str(p) for p in image_paths], "tools": payload["tools"], "stream": True})
+    log_json("Image API request", {"url": request_url, "mode": mode, "model": image_model, "prompt": prompt, "images": [str(p) for p in image_paths], "options": image_request_options()})
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.post(request_url, json=payload, timeout=60 * 30) as resp:
             content_type = resp.headers.get("content-type", "")
-            log(f"Image Responses status={resp.status} content_type={content_type}")
+            log(f"Image API status={resp.status} mode={mode} content_type={content_type}")
+            body = await resp.read()
+            body_text = body.decode("utf-8", errors="replace")
             if resp.status >= 400:
-                body = await resp.read()
-                body_text = body[:4000].decode("utf-8", errors="replace")
                 try:
                     error_data = json.loads(body_text)
                 except json.JSONDecodeError:
@@ -1574,22 +1606,20 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
                 detail = brief or sanitize_error_detail(body_text)
                 raise RuntimeError(f"HTTP {resp.status}: {detail}")
 
-            if "event-stream" in content_type:
-                image_b64 = await parse_responses_image_sse(resp)
-            else:
-                body = await resp.read()
-                body_text = body.decode("utf-8", errors="replace")
-                log(f"Image Responses body_preview={body[:300]!r}")
+            log(f"Image API body_preview={body[:300]!r}")
+            try:
                 data = json.loads(body_text)
-                image_b64 = find_image_generation_result(data)
-                if not image_b64:
-                    brief = summarize_image_error_payload(data)
-                    detail = f"响应没有返回 image_generation_call.result：{brief}" if brief else f"响应没有返回 image_generation_call.result，响应：{sanitize_error_detail(data)}"
-                    raise RuntimeError(detail)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"生图接口返回的不是有效 JSON：{sanitize_error_detail(body_text)}") from exc
+            image_b64 = extract_images_api_result(data)
+            if not image_b64:
+                brief = summarize_image_error_payload(data)
+                detail = f"响应没有返回图片 base64：{brief}" if brief else f"响应没有返回图片 base64，响应：{sanitize_error_detail(data)}"
+                raise RuntimeError(detail)
 
             target = OUTPUT_DIR / f"{uuid.uuid4().hex}.png"
             target.write_bytes(base64.b64decode(image_b64))
-            log(f"Image saved from Responses image_generation: {target}")
+            log(f"Image saved from Images API {mode}: {target}")
             return target
 
 
