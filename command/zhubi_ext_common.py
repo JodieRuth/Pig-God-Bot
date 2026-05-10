@@ -14,7 +14,7 @@ zhubi = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(zhubi)
 
 MAX_UNIT = 2147483647
-IDLE_BASE_RATE = 0.0001
+IDLE_BASE_RATE = 0.000025
 DECIMAL_PRECISION = 5
 DECIMAL_FACTOR = 10 ** DECIMAL_PRECISION
 LEVEL_NAMES = ["ULV", "LV", "MV", "HV", "EV", "IV", "LuV", "ZPM", "UV", "UHV", "UEV", "UIV", "UMV", "UXV", "MAX"]
@@ -24,9 +24,9 @@ UPGRADE_BASE_COSTS = {
     "speed": float(MAX_UNIT),
 }
 UPGRADE_COST_GROWTH = {
-    "quality": 1.35,
-    "efficiency": 1.45,
-    "speed": 1.6,
+    "quality": 2.25,
+    "efficiency": 3.75,
+    "speed": 5.5,
 }
 MILESTONES = [
     (25565.0, "ULV"),
@@ -200,7 +200,7 @@ def remake_multiplier(state: dict[str, Any]) -> float:
 
 
 def quality_multiplier(state: dict[str, Any]) -> float:
-    return 1.0 + 0.10 * int(state.get("quality", 0))
+    return 1.0 + 0.075 * int(state.get("quality", 0))
 
 
 def idle_multiplier(state: dict[str, Any]) -> float:
@@ -210,7 +210,7 @@ def idle_multiplier(state: dict[str, Any]) -> float:
 
 
 def idle_unit_rate(state: dict[str, Any]) -> float:
-    return IDLE_BASE_RATE + int(state.get("efficiency", 0)) * 0.00005
+    return IDLE_BASE_RATE + int(state.get("efficiency", 0)) * 0.000025
 
 
 def upgrade_cost(kind: str, level: int) -> int:

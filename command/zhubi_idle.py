@@ -16,7 +16,7 @@ spec.loader.exec_module(common)
 zhubi = common.zhubi
 
 HOURLY_LIMIT = 3
-HOURLY_WINDOW_SECONDS = 3600
+HOURLY_WINDOW_SECONDS = 1800
 hourly_usage: dict[str, deque[float]] = defaultdict(deque)
 
 
