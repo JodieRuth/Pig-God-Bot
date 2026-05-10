@@ -3,7 +3,10 @@
     "/识图"
   ],
   "/cancel": [],
+  "/ccf": [],
   "/clear": [],
+  "/getlist": [],
+  "/getprofile": [],
   "/haochi": [
     "/好吃"
   ],
@@ -27,6 +30,7 @@
   "/status": [],
   "/stop": [],
   "/switch": [],
+  "/tarot": [],
   "/test": [],
   "/test_show": [],
   "/update": [],

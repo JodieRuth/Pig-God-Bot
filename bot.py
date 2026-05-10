@@ -1336,10 +1336,9 @@ def image_api_url_for_mode(image_url: str, has_reference_images: bool) -> str:
 
 
 def image_request_options() -> dict[str, Any]:
-    options: dict[str, Any] = {}
+    options: dict[str, Any] = {"quality": os.getenv("IMAGE_QUALITY", "high").strip() or "high", "stream": True}
     value_map = {
         "IMAGE_SIZE": "size",
-        "IMAGE_QUALITY": "quality",
         "IMAGE_BACKGROUND": "background",
         "IMAGE_FORMAT": "output_format",
     }
@@ -1353,6 +1352,12 @@ def image_request_options() -> dict[str, Any]:
             options["output_compression"] = int(compression)
         except ValueError:
             options["output_compression"] = compression
+    partial_images = os.getenv("IMAGE_PARTIAL_IMAGES", "1").strip()
+    if partial_images:
+        try:
+            options["partial_images"] = int(partial_images)
+        except ValueError:
+            options["partial_images"] = partial_images
     return options
 
 
@@ -1541,7 +1546,7 @@ async def iter_sse_data(resp: aiohttp.ClientResponse):
             yield "\n".join(data_lines).strip()
 
 
-async def parse_responses_image_sse(resp: aiohttp.ClientResponse) -> str:
+async def parse_images_api_sse(resp: aiohttp.ClientResponse) -> str:
     final_image = ""
     recent_events: deque[str] = deque(maxlen=5)
     error_events: deque[str] = deque(maxlen=5)
@@ -1552,16 +1557,16 @@ async def parse_responses_image_sse(resp: aiohttp.ClientResponse) -> str:
             event = json.loads(data_text)
         except json.JSONDecodeError:
             preview = sanitize_error_detail(data_text, 300)
-            log(f"Image Responses SSE unparseable event: {preview}")
+            log(f"Image API SSE unparseable event: {preview}")
             recent_events.append(f"unparseable: {preview}")
             continue
         event_type = str(event.get("type") or "")
         summary = summarize_sse_event(event)
-        log(f"Image Responses SSE event: {summary}")
+        log(f"Image API SSE event: {summary}")
         recent_events.append(summarize_image_event_brief(event))
         if any(keyword in event_type.lower() for keyword in ("error", "failed", "rejected", "abort")) or isinstance(event.get("error"), dict):
             error_events.append(summarize_image_event_brief(event))
-        image_data = find_image_generation_result(event)
+        image_data = extract_images_api_result(event)
         if image_data and "partial" not in event_type:
             final_image = image_data
     if not final_image:
@@ -1595,27 +1600,37 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
         async with session.post(request_url, json=payload, timeout=60 * 30) as resp:
             content_type = resp.headers.get("content-type", "")
             log(f"Image API status={resp.status} mode={mode} content_type={content_type}")
-            body = await resp.read()
-            body_text = body.decode("utf-8", errors="replace")
-            if resp.status >= 400:
+            if "event-stream" in content_type:
+                if resp.status >= 400:
+                    error_text = ""
+                    async for data_text in iter_sse_data(resp):
+                        if data_text and data_text != "[DONE]":
+                            error_text = data_text
+                    try:
+                        error_data = json.loads(error_text) if error_text else None
+                    except json.JSONDecodeError:
+                        error_data = None
+                    brief = summarize_image_error_payload(error_data) if error_data is not None else ""
+                    detail = brief or sanitize_error_detail(error_text)
+                    raise RuntimeError(f"HTTP {resp.status}: {detail}")
+                image_b64 = await parse_images_api_sse(resp)
+            else:
+                body = await resp.read()
+                body_text = body.decode("utf-8", errors="replace")
+                log(f"Image API body_preview={body[:300]!r}")
                 try:
-                    error_data = json.loads(body_text)
-                except json.JSONDecodeError:
-                    error_data = None
-                brief = summarize_image_error_payload(error_data) if error_data is not None else ""
-                detail = brief or sanitize_error_detail(body_text)
-                raise RuntimeError(f"HTTP {resp.status}: {detail}")
-
-            log(f"Image API body_preview={body[:300]!r}")
-            try:
-                data = json.loads(body_text)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(f"生图接口返回的不是有效 JSON：{sanitize_error_detail(body_text)}") from exc
-            image_b64 = extract_images_api_result(data)
-            if not image_b64:
-                brief = summarize_image_error_payload(data)
-                detail = f"响应没有返回图片 base64：{brief}" if brief else f"响应没有返回图片 base64，响应：{sanitize_error_detail(data)}"
-                raise RuntimeError(detail)
+                    data = json.loads(body_text)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"生图接口返回的不是有效 JSON：{sanitize_error_detail(body_text)}") from exc
+                if resp.status >= 400:
+                    brief = summarize_image_error_payload(data)
+                    detail = brief or sanitize_error_detail(body_text)
+                    raise RuntimeError(f"HTTP {resp.status}: {detail}")
+                image_b64 = extract_images_api_result(data)
+                if not image_b64:
+                    brief = summarize_image_error_payload(data)
+                    detail = f"响应没有返回图片 base64：{brief}" if brief else f"响应没有返回图片 base64，响应：{sanitize_error_detail(data)}"
+                    raise RuntimeError(detail)
 
             target = OUTPUT_DIR / f"{uuid.uuid4().hex}.png"
             target.write_bytes(base64.b64decode(image_b64))
