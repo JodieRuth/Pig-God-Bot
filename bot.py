@@ -1125,7 +1125,10 @@ def build_openai_messages(prompt: str, context_texts: list[str], context_notes: 
     context = "\n".join(context_texts[-MAX_CONTEXT_MESSAGES:])
     image_note = build_image_input_note(images)
     policy_note = prompt_image_source_note(images)
-    user_text = f"最近群聊上下文：\n{context}\n\n{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n当前请求：\n{prompt}\n\n{policy_note}\n\n{image_note}" if context else f"{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n当前请求：\n{prompt}\n\n{policy_note}\n\n{image_note}"
+    if context:
+        user_text = f"最近群聊上下文：\n{context}\n\n{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n{policy_note}\n\n{image_note}\n\n当前请求：\n{prompt}"
+    else:
+        user_text = f"{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n{policy_note}\n\n{image_note}\n\n当前请求：\n{prompt}"
     content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
     for record in images[:MAX_CONTEXT_IMAGES]:
         content.append({"type": "image_url", "image_url": {"url": image_data_url(image_path(record))}})

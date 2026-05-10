@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import re
+import os
 from typing import Any
 
 
@@ -23,7 +23,11 @@ def member_line(index: int, member: dict[str, Any]) -> str:
     return f"{index}. QQ号：{user_id} | 群名片：{card} | QQ昵称：{nickname} | 显示名：{member_display_name(member)}"
 
 
-async def handle_getlist(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
+def chunk_lines(lines: list[str], chunk_size: int = 50) -> list[list[str]]:
+    return [lines[index:index + chunk_size] for index in range(0, len(lines), chunk_size)]
+
+
+async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if not ctx["is_admin_event"](event):
         await ctx["reply"](event, "你没有权限使用这个指令。")
         return
@@ -44,34 +48,28 @@ async def handle_getlist(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -
         await ctx["reply"](event, "获取群成员列表失败或当前群成员列表为空。")
         return
     members.sort(key=lambda item: int(item.get("user_id") or 0) if str(item.get("user_id") or "").isdigit() else 0)
-    lines = [f"群 {group_id} 成员映射，共 {len(members)} 人："]
-    lines.extend(member_line(index, member) for index, member in enumerate(members, 1))
-    await ctx["reply_forward"](event, lines)
+    lines = [member_line(index, member) for index, member in enumerate(members, 1)]
+    sections = chunk_lines(lines, 50)
+    bot_qq = os.getenv("BOT_QQ", "")
+    bot_name = os.getenv("BOT_NAME", "") or "Bot"
+    messages: list[dict[str, Any]] = []
+    for index, section in enumerate(sections):
+        content_lines = [f"群 {group_id} 成员映射，共 {len(members)} 人：" if index == 0 else f"群 {group_id} 成员映射（继续）："]
+        content_lines.extend(section)
+        messages.append({
+            "type": "node",
+            "data": {
+                "nickname": bot_name,
+                "user_id": bot_qq,
+                "content": [{"type": "text", "data": {"text": "\n".join(content_lines)}}],
+            },
+        })
+    await ctx["onebot_post"]("send_group_forward_msg", {"group_id": group_id, "messages": messages})
 
 
-async def handle_getprofile(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
-    target = arg.strip()
-    if not re.fullmatch(r"\d{5,20}", target):
-        await ctx["reply"](event, "用法：/getprofile <QQ号>")
-        return
-    avatar_url = ctx["qq_avatar_url"](target)
-    await ctx["reply"](event, [
-        {"type": "text", "data": {"text": f"QQ {target} 的头像：\n"}},
-        {"type": "image", "data": {"file": avatar_url}},
-    ])
-
-
-COMMANDS = [
-    {
-        "name": "/getlist",
-        "usage": "/getlist",
-        "description": "仅所有者可用：导出当前群成员的 QQ号、群名片与 QQ昵称映射。",
-        "handler": handle_getlist,
-    },
-    {
-        "name": "/getprofile",
-        "usage": "/getprofile <QQ号>",
-        "description": "发送指定 QQ号的头像。",
-        "handler": handle_getprofile,
-    },
-]
+COMMAND = {
+    "name": "/getlist",
+    "usage": "/getlist",
+    "description": "仅所有者可用：导出当前群成员的 QQ号、群名片与 QQ昵称映射。",
+    "handler": handler,
+}
