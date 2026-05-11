@@ -261,6 +261,33 @@ def _update_vndb_data(root: Path) -> str:
         return f"{type(exc).__name__}: {exc}"
 
 
+def _build_webview2_host(root: Path) -> str:
+    project = root / C_SHARP_ROOT / "browser_automation_host.csproj"
+    if not project.exists():
+        return "WebView2 宿主项目不存在"
+    try:
+        env = os.environ.copy()
+        env["DOTNET_CLI_UI_LANGUAGE"] = "zh-CN"
+        result = subprocess.run(
+            ["dotnet", "build", str(project), "-c", "Release"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=str(root),
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        output = " ".join((result.stdout + "\n" + result.stderr).split())
+        if result.returncode != 0:
+            return f"dotnet build WebView2 宿主返回 exit code {result.returncode}: {_short_error(output)}"
+        return ""
+    except subprocess.TimeoutExpired:
+        return "dotnet build WebView2 宿主超时"
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
 def _backup_to_rollback(bot_root: Path) -> str:
     rollback_root = bot_root / ROLLBACK_DIR_NAME
     rollback_root.mkdir(parents=True, exist_ok=True)
@@ -386,6 +413,13 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     else:
         await ctx["reply"](event, "VNDB 数据已更新到 tools/data。")
 
+    await ctx["reply"](event, "正在构建 WebView2 浏览器宿主...")
+    webview2_build_error = _build_webview2_host(bot_root)
+    if webview2_build_error:
+        await ctx["reply"](event, f"WebView2 浏览器宿主构建失败，将继续重启 bot：{webview2_build_error}")
+    else:
+        await ctx["reply"](event, "WebView2 浏览器宿主已构建完成。")
+
     pending = {
         "rollback_timestamp": rollback_timestamp,
         "event": {
@@ -431,6 +465,8 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             ctx["log"](f"Update finished with Crawl4AI warning: {crawl4ai_error}")
         if vndb_error:
             ctx["log"](f"Update finished with VNDB warning: {vndb_error}")
+        if webview2_build_error:
+            ctx["log"](f"Update finished with WebView2 build warning: {webview2_build_error}")
         os._exit(0)
 
     if proc.returncode is not None:

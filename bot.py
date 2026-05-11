@@ -1932,10 +1932,11 @@ async def force_reset_managed_services() -> None:
         await asyncio.sleep(1)
 
 
-async def write_pending_restart_message(event: dict[str, Any], message: str) -> None:
+async def write_pending_restart_message(event: dict[str, Any], message: str, report_services: bool = False) -> None:
     pending = {
         "kind": "restart",
         "message": message,
+        "report_services": report_services,
         "event": {
             "message_type": event.get("message_type"),
             "group_id": event.get("group_id"),
@@ -1946,10 +1947,10 @@ async def write_pending_restart_message(event: dict[str, Any], message: str) -> 
     (ROOT / ".pending_update.json").write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
 
 
-async def reboot_process(event: dict[str, Any] | None = None, done_message: str = "重启完成，bot 已重新上线。") -> None:
+async def reboot_process(event: dict[str, Any] | None = None, done_message: str = "重启完成，bot 已重新上线。", report_services: bool = False) -> None:
     log("Reboot requested, replacing current process")
     if event is not None:
-        await write_pending_restart_message(event, done_message)
+        await write_pending_restart_message(event, done_message, report_services=report_services)
     await force_reset_managed_services()
     os.environ["LOCAL_ONEBOT_LOG_FILE"] = str(LOG_FILE)
     sys.stdout.flush()
@@ -3095,7 +3096,7 @@ async def main() -> None:
                         pending_message = str(pending_update.get("message") or "更新完成，bot 已连接 OneBot，当前可响应消息。")
                         await send_pending_update_message(pending_update, pending_message, remove_pending_file=True)
                         pending_update_reported = True
-                        if pending_update.get("kind") != "restart":
+                        if pending_update.get("kind") != "restart" or pending_update.get("report_services"):
                             service_status_report_task = asyncio.create_task(report_startup_service_statuses(pending_update, searxng_task, vndb_task))
                     async for raw in ws:
                         try:

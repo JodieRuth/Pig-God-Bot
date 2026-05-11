@@ -104,7 +104,7 @@ public partial class MainForm : Form
         await WaitForPageReadyAsync();
         await UploadImageAsync(options.Image);
         await TriggerSearchAsync();
-        await Task.Delay(Math.Max(1000, options.WaitMs));
+        await WaitForAnimeTraceResultAsync();
         var bodyText = await EvalStringAsync("document.body ? document.body.innerText : ''");
         var title = await EvalStringAsync("document.title || ''");
         var currentUrl = webView.Source?.ToString() ?? options.Url;
@@ -232,6 +232,37 @@ public partial class MainForm : Form
         throw new TimeoutException("等待页面就绪超时");
     }
 
+    private async Task WaitForAnimeTraceResultAsync()
+    {
+        var minimumDelay = DateTimeOffset.UtcNow.AddMilliseconds(Math.Min(Math.Max(1000, options.WaitMs), 3000));
+        var deadline = DateTimeOffset.UtcNow.AddMilliseconds(Math.Max(1000, options.WaitMs));
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (DateTimeOffset.UtcNow >= minimumDelay && searchResponse["text"] is not null)
+            {
+                return;
+            }
+            var hasRenderedResult = await EvalBoolAsync("""
+(() => {
+  const lines = (document.body?.innerText || '').split(/\n+/).map(x => x.trim()).filter(Boolean);
+  const start = lines.indexOf('Search result');
+  if (start < 0) return false;
+  const noise = new Set(['Click the character name to view related images', 'Results will appear here after uploading an image']);
+  for (const line of lines.slice(start + 1)) {
+    if (line === 'New Notice!' || line === 'Notice Board' || line === 'Got it' || line.includes('File Upload')) return false;
+    if (!noise.has(line)) return true;
+  }
+  return false;
+})()
+""");
+            if (hasRenderedResult)
+            {
+                return;
+            }
+            await Task.Delay(500);
+        }
+    }
+
     private async Task UploadImageAsync(string image)
     {
         var count = await EvalIntAsync("document.querySelectorAll('input[type=file]').length");
@@ -330,6 +361,12 @@ public partial class MainForm : Form
     {
         var json = await webView.CoreWebView2.ExecuteScriptAsync(expression);
         return JsonSerializer.Deserialize<int>(json);
+    }
+
+    private async Task<bool> EvalBoolAsync(string expression)
+    {
+        var json = await webView.CoreWebView2.ExecuteScriptAsync(expression);
+        return JsonSerializer.Deserialize<bool>(json);
     }
 
     private async Task WriteResultAsync(Dictionary<string, object?> result)

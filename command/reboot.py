@@ -17,9 +17,9 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         await ctx["reply"](event, "你没有权限使用重启指令。")
         return
     ctx["bot_state"]["stopped"] = False
-    await ctx["reply"](event, "正在重启 bot 进程。")
+    await ctx["reply"](event, "正在重启 bot 进程，并重启 VNDB 与 SearXNG 服务。")
     await asyncio.sleep(0.5)
-    await ctx["reboot_process"](event)
+    await ctx["reboot_process"](event, report_services=True)
 
 
 COMMAND = {

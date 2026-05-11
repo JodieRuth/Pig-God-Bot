@@ -5,6 +5,7 @@ import asyncio
 import ctypes
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -104,7 +105,26 @@ async def run(image_path: Path, url: str, wait_ms: int, browser_path: str | None
                 pass
 
         start = time.perf_counter()
-        await page.wait_for_timeout(wait_ms)
+        minimum_wait = min(max(wait_ms / 1000, 1), 3)
+        deadline = start + max(wait_ms / 1000, 1)
+        while time.perf_counter() < deadline:
+            body_text = await page.locator("body").inner_text()
+            lines = [re.sub(r"\s+", " ", raw).strip() for raw in body_text.splitlines()]
+            lines = [line for line in lines if line]
+            try:
+                result_start = lines.index("Search result") + 1
+            except ValueError:
+                result_start = -1
+            useful = []
+            if result_start >= 0:
+                for line in lines[result_start:]:
+                    if line in {"New Notice!", "Notice Board", "Got it"} or "File Upload" in line:
+                        break
+                    if line not in {"Click the character name to view related images", "Results will appear here after uploading an image"}:
+                        useful.append(line)
+            if time.perf_counter() - start >= minimum_wait and (search_response_obj is not None or useful):
+                break
+            await page.wait_for_timeout(500)
         elapsed = time.perf_counter() - start
         body_text = await page.locator("body").inner_text()
 

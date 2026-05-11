@@ -65,8 +65,11 @@ def select_images(images: list[dict[str, Any]], image_indexes: list[Any]) -> lis
 
 
 async def ensure_host_built(ctx: dict[str, Any]) -> None:
+    source_paths = [HOST_DIR / name for name in ("HostOptions.cs", "MainForm.cs", "MainForm.Designer.cs", "Program.cs", "browser_automation_host.csproj")]
     if HOST_DLL.exists():
-        return
+        dll_mtime = HOST_DLL.stat().st_mtime
+        if all(not path.exists() or path.stat().st_mtime <= dll_mtime for path in source_paths):
+            return
     if not HOST_PROJECT.exists():
         raise RuntimeError("WebView2 宿主项目不存在")
     ctx["log"]("AnimeTrace WebView2 host build start")
@@ -272,6 +275,10 @@ def collect_page_candidates(body_text: str, limit: int = 5) -> list[str]:
         if line.lower().startswith("error feedback"):
             break
         useful.append(line)
+    if not useful:
+        return []
+    if useful[0] in {"recognition", "GitHub", "notice", "statistics", "discuss", "Copyright", "English", "Anime and Galgame recognition"}:
+        return []
     candidates = []
     for index in range(0, len(useful) - 1, 2):
         character = useful[index]
@@ -326,6 +333,12 @@ def sanitize_child_error(text: str, limit: int = 300) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+def is_unrecognized_landing_text(body_text: str) -> bool:
+    text = str(body_text or "")
+    required = ["Anime and Galgame recognition", "File Upload", "Results will appear here after uploading an image"]
+    return all(value in text for value in required)
+
+
 def result_preview(result: dict[str, Any]) -> str:
     search_response = result.get("search_response") if isinstance(result.get("search_response"), dict) else {}
     search_text = str(search_response.get("text") or "") if isinstance(search_response, dict) else ""
@@ -340,7 +353,10 @@ def result_preview(result: dict[str, Any]) -> str:
         return "\n".join(lines)
     if parsed is not None:
         return "没有找到任何可能符合的角色。"
-    body_summary = summarize_body(str(result.get("body_text") or ""))
+    body_text = str(result.get("body_text") or "")
+    if is_unrecognized_landing_text(body_text):
+        return "AnimeTrace 没有返回可读识别结果，官网页面仍停留在上传/等待结果状态。"
+    body_summary = summarize_body(body_text)
     if body_summary:
         return body_summary
     if search_text:
