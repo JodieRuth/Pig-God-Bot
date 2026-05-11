@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ SCRIPT_PATH = Path(__file__).with_name("animetrace_headless.py")
 HOST_DIR = Path(__file__).with_name("browser_automation_host")
 HOST_PROJECT = HOST_DIR / "browser_automation_host.csproj"
 HOST_DLL = HOST_DIR / "bin" / "Release" / "net9.0-windows" / "browser_automation_host.dll"
+HOST_BUILD_STAMP = HOST_DLL.with_suffix(".source.sha256")
 DEFAULT_URL = os.getenv("ANIMETRACE_URL", "https://ai.animedb.cn/en/")
 DEFAULT_WAIT_MS = int(os.getenv("ANIMETRACE_WAIT_MS", "20000"))
 DEFAULT_CAPTURE_JSON = os.getenv("ANIMETRACE_CAPTURE_JSON", "0") == "1"
@@ -64,12 +66,29 @@ def select_images(images: list[dict[str, Any]], image_indexes: list[Any]) -> lis
     return selected[:1]
 
 
+def host_source_paths() -> list[Path]:
+    return [HOST_DIR / name for name in ("HostOptions.cs", "MainForm.cs", "MainForm.Designer.cs", "Program.cs", "browser_automation_host.csproj")]
+
+
+def host_source_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for path in host_source_paths():
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        if path.exists():
+            digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 async def ensure_host_built(ctx: dict[str, Any]) -> None:
-    source_paths = [HOST_DIR / name for name in ("HostOptions.cs", "MainForm.cs", "MainForm.Designer.cs", "Program.cs", "browser_automation_host.csproj")]
-    if HOST_DLL.exists():
-        dll_mtime = HOST_DLL.stat().st_mtime
-        if all(not path.exists() or path.stat().st_mtime <= dll_mtime for path in source_paths):
-            return
+    source_hash = host_source_fingerprint()
+    if HOST_DLL.exists() and HOST_BUILD_STAMP.exists():
+        try:
+            if HOST_BUILD_STAMP.read_text(encoding="utf-8").strip() == source_hash:
+                return
+        except OSError:
+            pass
     if not HOST_PROJECT.exists():
         raise RuntimeError("WebView2 宿主项目不存在")
     ctx["log"]("AnimeTrace WebView2 host build start")
@@ -92,6 +111,11 @@ async def ensure_host_built(ctx: dict[str, Any]) -> None:
     if proc.returncode != 0 or not HOST_DLL.exists():
         detail = sanitize_child_error(stderr_text or stdout_text or f"exit code {proc.returncode}")
         raise RuntimeError(f"WebView2 宿主编译失败：{detail}")
+    try:
+        HOST_BUILD_STAMP.parent.mkdir(parents=True, exist_ok=True)
+        HOST_BUILD_STAMP.write_text(source_hash, encoding="utf-8")
+    except OSError as exc:
+        ctx["log"](f"AnimeTrace WebView2 host build stamp write failed: {exc}")
 
 
 async def run_animetrace_webview2(image: Path, ctx: dict[str, Any]) -> dict[str, Any]:

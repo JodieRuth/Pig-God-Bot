@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib.util
 import json
 import os
@@ -33,7 +34,7 @@ ALLOWED_JSON_FILES = {
     "command/haochi/foods.json",
 }
 C_SHARP_ROOT = "tools/browser_automation_host"
-C_SHARP_ALLOWED_SUFFIXES = {".cs", ".csproj"}
+C_SHARP_ALLOWED_SUFFIXES = {".cs", ".csproj", ".sha256"}
 ROOT_ALLOWED_FILES = {"requirements.txt", "tools/server.mjs"}
 ROLLBACK_DIR_NAME = "rollback"
 PENDING_UPDATE_FILE = ".pending_update.json"
@@ -261,6 +262,22 @@ def _update_vndb_data(root: Path) -> str:
         return f"{type(exc).__name__}: {exc}"
 
 
+def _webview2_source_paths(root: Path) -> list[Path]:
+    host_root = root / C_SHARP_ROOT
+    return [host_root / name for name in ("HostOptions.cs", "MainForm.cs", "MainForm.Designer.cs", "Program.cs", "browser_automation_host.csproj")]
+
+
+def _webview2_source_fingerprint(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in _webview2_source_paths(root):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        if path.exists():
+            digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _build_webview2_host(root: Path) -> str:
     project = root / C_SHARP_ROOT / "browser_automation_host.csproj"
     if not project.exists():
@@ -281,6 +298,9 @@ def _build_webview2_host(root: Path) -> str:
         output = " ".join((result.stdout + "\n" + result.stderr).split())
         if result.returncode != 0:
             return f"dotnet build WebView2 宿主返回 exit code {result.returncode}: {_short_error(output)}"
+        stamp = root / C_SHARP_ROOT / "bin" / "Release" / "net9.0-windows" / "browser_automation_host.source.sha256"
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(_webview2_source_fingerprint(root), encoding="utf-8")
         return ""
     except subprocess.TimeoutExpired:
         return "dotnet build WebView2 宿主超时"
