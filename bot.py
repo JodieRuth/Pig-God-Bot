@@ -1295,6 +1295,8 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         if tool_calls:
             log_json("LLM tool calls", tool_calls)
             assistant_message = {"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls}
+            if "reasoning_content" in message:
+                assistant_message["reasoning_content"] = message.get("reasoning_content") or ""
             messages.append(assistant_message)
             for tool_call in tool_calls:
                 function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
