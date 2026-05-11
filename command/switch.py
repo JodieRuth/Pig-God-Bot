@@ -108,6 +108,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
     target_pos: int | None = None
     base_model = model
+    disabled = ctx["disabled_llm_models"] if kind == "llm" else ctx["disabled_image_models"]
     if "#" in model:
         base_model, _, num_part = model.rpartition("#")
         if num_part.isdigit():
@@ -122,7 +123,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if target_pos is not None:
         config = configs[target_pos]
         models, error = await fetch_models(config)
-        disabled = ctx["disabled_llm_models"] if kind == "llm" else ctx["disabled_image_models"]
         models = [m for m in models if m.lower() not in disabled]
         if error:
             await ctx["reply"](event, f"获取 #{target_pos} 模型列表失败：{error}")
