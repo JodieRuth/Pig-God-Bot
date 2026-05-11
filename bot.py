@@ -470,10 +470,43 @@ LLM_DISABLED_MODELS: set[str] = {m.strip().lower() for m in os.getenv("LLM_DISAB
 IMAGE_DISABLED_MODELS: set[str] = {m.strip().lower() for m in os.getenv("IMAGE_DISABLED_MODELS", "").split(",") if m.strip()}
 DEBUG_LOG = os.getenv("DEBUG_LOG", "1") != "0"
 
+def resolve_prompt_file_reference(value: str) -> str | None:
+    ref = value.strip()
+    if not ref:
+        return None
+    if "\n" in ref or "\r" in ref:
+        return None
+    normalized_ref = ref.replace("\\", "/").lstrip("/")
+    direct_path = (ROOT / normalized_ref).resolve()
+    try:
+        if direct_path.is_file() and direct_path.is_relative_to(ROOT):
+            return direct_path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    if "/" in normalized_ref:
+        return None
+    try:
+        matches = sorted(path for path in ROOT.rglob("*") if path.is_file() and path.name == ref)
+    except OSError:
+        return None
+    if len(matches) == 1:
+        try:
+            return matches[0].read_text(encoding="utf-8")
+        except OSError:
+            return None
+    return None
+
+
 def prompt_value(key: str, scope_key: str = "") -> str:
     value = active_prompt_config(scope_key).get(key, "")
     if isinstance(value, list):
         return "\n".join(str(item) for item in value if item)
+    if isinstance(value, str):
+        if key in {"system_prompt", "admin_system_prompt"}:
+            file_content = resolve_prompt_file_reference(value)
+            if file_content is not None:
+                return file_content
+        return value
     return str(value) if value else ""
 
 
