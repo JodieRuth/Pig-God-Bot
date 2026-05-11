@@ -117,12 +117,14 @@ async def run(image_path: Path, url: str, wait_ms: int, browser_path: str | None
                 result_start = -1
             useful = []
             if result_start >= 0:
+                stop_markers = {"📢 New Notice!", "New Notice!", "Notice Board", "Got it", "@2024 AnimeTrace", "新機能"}
+                noise = {"Click the character name to view related images", "Results will appear here after uploading an image"}
                 for line in lines[result_start:]:
-                    if line in {"New Notice!", "Notice Board", "Got it"} or "File Upload" in line:
+                    if line in stop_markers or "File Upload" in line or "Image processing, please wait" in line or "AI is analyzing image" in line:
                         break
-                    if line not in {"Click the character name to view related images", "Results will appear here after uploading an image"}:
+                    if line not in noise:
                         useful.append(line)
-            if time.perf_counter() - start >= minimum_wait and (search_response_obj is not None or useful):
+            if time.perf_counter() - start >= minimum_wait and (search_response_obj is not None or len(useful) >= 2):
                 break
             await page.wait_for_timeout(500)
         elapsed = time.perf_counter() - start

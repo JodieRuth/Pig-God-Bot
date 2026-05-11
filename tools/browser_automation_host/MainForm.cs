@@ -248,11 +248,13 @@ public partial class MainForm : Form
   const start = lines.indexOf('Search result');
   if (start < 0) return false;
   const noise = new Set(['Click the character name to view related images', 'Results will appear here after uploading an image']);
+  const stops = new Set(['📢 New Notice!', 'New Notice!', 'Notice Board', 'Got it', '@2024 AnimeTrace', '新機能']);
+  const useful = [];
   for (const line of lines.slice(start + 1)) {
-    if (line === 'New Notice!' || line === 'Notice Board' || line === 'Got it' || line.includes('File Upload')) return false;
-    if (!noise.has(line)) return true;
+    if (stops.has(line) || line.includes('File Upload') || line.includes('Image processing, please wait') || line.includes('AI is analyzing image')) break;
+    if (!noise.has(line)) useful.push(line);
   }
-  return false;
+  return useful.length >= 2;
 })()
 """);
             if (hasRenderedResult)
