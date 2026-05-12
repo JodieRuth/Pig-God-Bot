@@ -14,7 +14,12 @@ zhubi = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(zhubi)
 
 MAX_UNIT = 2147483647
+CLEAR_THRESHOLD = MAX_UNIT * MAX_UNIT
 IDLE_BASE_RATE = 0.000025
+IDLE_EFFICIENCY_STEP = 0.000025
+QUALITY_STEP = 0.075
+SPEED_MULTIPLIER = 1.025
+REMAKE_STEP = 0.15
 DECIMAL_PRECISION = 5
 DECIMAL_FACTOR = 10 ** DECIMAL_PRECISION
 LEVEL_NAMES = ["ULV", "LV", "MV", "HV", "EV", "IV", "LuV", "ZPM", "UV", "UHV", "UEV", "UIV", "UMV", "UXV", "MAX"]
@@ -196,21 +201,21 @@ def format_amount(value: int | float) -> str:
 
 
 def remake_multiplier(state: dict[str, Any]) -> float:
-    return 1.0 + 0.15 * int(state.get("remakes", 0))
+    return 1.0 + REMAKE_STEP * int(state.get("remakes", 0))
 
 
 def quality_multiplier(state: dict[str, Any]) -> float:
-    return 1.0 + 0.075 * int(state.get("quality", 0))
+    return 1.0 + QUALITY_STEP * int(state.get("quality", 0))
 
 
 def idle_multiplier(state: dict[str, Any]) -> float:
     quality = quality_multiplier(state)
-    speed = 1.025 ** int(state.get("speed", 0))
+    speed = SPEED_MULTIPLIER ** int(state.get("speed", 0))
     return quality * speed * remake_multiplier(state)
 
 
 def idle_unit_rate(state: dict[str, Any]) -> float:
-    return IDLE_BASE_RATE + int(state.get("efficiency", 0)) * 0.000025
+    return IDLE_BASE_RATE + int(state.get("efficiency", 0)) * IDLE_EFFICIENCY_STEP
 
 
 def upgrade_cost(kind: str, level: int) -> int:
@@ -233,12 +238,41 @@ def milestone_index(total: float) -> int:
     return result
 
 
+def remake_user(user: dict[str, Any], group_id: int | None = None) -> int:
+    state = idle_state(user)
+    remakes = int(state.get("remakes", 0)) + 1
+    user["balance"] = 0.0
+    user["idle"] = {
+        "coins": 0.0,
+        "max": 0.0,
+        "last_tick": time.time(),
+        "quality": 0,
+        "efficiency": 0,
+        "speed": 0,
+        "remakes": remakes,
+        "cleared": False,
+        "last_milestone": -1,
+        "group_id": int(group_id if group_id is not None else state.get("group_id", 0) or 0),
+    }
+    return remakes
+
+
+def enforce_auto_remake(user: dict[str, Any], group_id: int | None = None) -> bool:
+    state = idle_state(user)
+    if balance_of(user) > CLEAR_THRESHOLD or idle_total_coins(state) > CLEAR_THRESHOLD:
+        remake_user(user, group_id)
+        return True
+    return False
+
+
 def apply_idle_income_to_user(user: dict[str, Any], now: float | None = None) -> tuple[bool, int, str, float]:
     state = idle_state(user)
     current = time.time() if now is None else now
     last_tick = float(state.get("last_tick", current))
     elapsed = max(0, int(current - last_tick))
-    state["last_tick"] = last_tick + elapsed
+    state["last_tick"] = current
+    if enforce_auto_remake(user):
+        return True, len(MILESTONES) - 1, "自动转生", 0.0
     if elapsed <= 0 or state.get("cleared"):
         return False, -1, "", 0.0
     total_before = whole_idle_total_coins(state)
@@ -246,8 +280,10 @@ def apply_idle_income_to_user(user: dict[str, Any], now: float | None = None) ->
         return False, -1, "", 0.0
     gain = total_before * idle_unit_rate(state) * idle_multiplier(state) * elapsed
     change_balance(user, gain)
+    if enforce_auto_remake(user):
+        return True, len(MILESTONES) - 1, "自动转生", 0.0
     total_after = idle_total_coins(state)
-    reached = milestone_index(total_after)
+    reached = milestone_index(max(total_after, balance_of(user)))
     previous = int(state.get("last_milestone", -1))
     if reached > previous:
         state["last_milestone"] = reached

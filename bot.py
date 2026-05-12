@@ -3081,6 +3081,18 @@ async def main() -> None:
     pending_update = await _load_pending_update()
     searxng_task = asyncio.create_task(start_searxng_server())
     vndb_task = asyncio.create_task(start_vndb_json_server())
+    try:
+        module_path = COMMAND_DIR / "zhubi_ext_common.py"
+        if module_path.exists():
+            spec = importlib.util.spec_from_file_location("local_onebot_zhubi_ext_common_startup", module_path)
+            if spec is not None and spec.loader is not None:
+                common = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(common)
+                data = common.zhubi.load_data()
+                common.apply_idle_income(data, time.time())
+                common.zhubi.save_data(data)
+    except Exception:
+        log(f"Zhubi startup recalculation failed:\n{traceback.format_exc()}")
     if "zhubi_idle_tick" not in jobs:
         jobs["zhubi_idle_tick"] = asyncio.create_task(zhubi_idle_tick_loop())
     log(f"Connecting to {ONEBOT_WS}")

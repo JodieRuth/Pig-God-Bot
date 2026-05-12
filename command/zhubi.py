@@ -13,6 +13,7 @@ DATA_DIR = Path(__file__).with_name("zhubi")
 DATA_FILE = DATA_DIR / "data.json"
 DAILY_LIMIT = 1
 MAX_UNIT = 2147483647
+CLEAR_THRESHOLD = MAX_UNIT * MAX_UNIT
 DECIMAL_PRECISION = 5
 DECIMAL_FACTOR = 10 ** DECIMAL_PRECISION
 
@@ -239,35 +240,25 @@ async def handle_add(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> bo
     return True
 
 
-def idle_summary(user: dict[str, Any]) -> str:
-    state = user.setdefault("idle", {})
-    if not isinstance(state, dict):
-        state = {}
-        user["idle"] = state
-    coins = truncate_decimal(float(state.get("coins", 0.0)))
-    max_count = float(state.get("max", 0.0))
-    total = max_count * MAX_UNIT + coins
-    quality = max(0, int(state.get("quality", 0)))
-    efficiency = max(0, int(state.get("efficiency", 0)))
-    speed = max(0, int(state.get("speed", 0)))
-    remakes = max(0, int(state.get("remakes", 0)))
-    quality_multiplier = 1.0 + 0.10 * quality
-    speed_multiplier = 1.025 ** speed
-    remake_multiplier = 1 + 0.15 * remakes
-    unit_rate = 0.0001 + efficiency * 0.00005
-    total_multiplier = quality_multiplier * speed_multiplier * remake_multiplier
-    int_base = int(max_count) * MAX_UNIT + int(coins)
-    growth_per_sec = int_base * unit_rate * total_multiplier
+def idle_summary(user: dict[str, Any], common: Any) -> str:
+    state = common.idle_state(user)
+    total = common.idle_total_coins(state)
+    int_base = common.whole_idle_total_coins(state)
+    growth_per_sec = int_base * common.idle_unit_rate(state) * common.idle_multiplier(state)
+    quality = int(state.get("quality", 0))
+    efficiency = int(state.get("efficiency", 0))
+    speed = int(state.get("speed", 0))
+    remakes = int(state.get("remakes", 0))
     return "\n".join([
-        f"当前持有：{format_balance(user['balance'])}",
-        f"idle 运作中：{format_balance(total)}",
-        f"idle 整数增长基数：{format_balance(int_base)}",
-        f"idle 每秒产出到主钱包：{format_balance(growth_per_sec)}",
-        f"quality 等级：{quality}，倍率：{quality_multiplier:.4f}x",
-        f"efficiency 等级：{efficiency}，每单位基础获取率：{unit_rate:.6f}/秒",
-        f"speed 等级：{speed}，倍率：{speed_multiplier:.4f}x",
-        f"转生次数：{remakes}，转生倍率：{remake_multiplier:.2f}x",
-        f"总效率倍率：{total_multiplier:.4f}x",
+        f"当前持有：{common.format_amount(common.balance_of(user))}",
+        f"idle 运作中：{common.format_amount(total)}",
+        f"idle 整数增长基数：{common.format_amount(int_base)}",
+        f"idle 每秒产出到主钱包：{common.format_amount(growth_per_sec)}",
+        f"quality 等级：{common.level_label(quality)}，倍率：{common.quality_multiplier(state):.4f}x",
+        f"efficiency 等级：{common.level_label(efficiency)}，每单位基础获取率：{common.idle_unit_rate(state):.6f}/秒",
+        f"speed 等级：{common.level_label(speed)}，倍率：{common.SPEED_MULTIPLIER ** speed:.4f}x",
+        f"转生次数：{remakes}，转生倍率：{common.remake_multiplier(state):.2f}x",
+        f"总效率倍率：{common.idle_multiplier(state):.4f}x",
         f"当前状态：{'已通关' if bool(state.get('cleared', False)) else '运行中'}",
     ])
 
@@ -288,7 +279,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         spec.loader.exec_module(common)
         common.apply_idle_income(data)
         save_data(data)
-        await ctx["reply"](event, idle_summary(user))
+        await ctx["reply"](event, idle_summary(user, common))
         return
     is_admin = ctx["is_admin_event"](event)
     if not is_admin and float(user.get("daily_claims", 0)) >= DAILY_LIMIT:

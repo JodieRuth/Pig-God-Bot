@@ -15,6 +15,7 @@ spec.loader.exec_module(common)
 zhubi = common.zhubi
 
 DAILY_ZHUA_LIMIT = 3
+MAX_LEVEL_GAP = 3
 
 
 def extract_at_target(message: list[dict[str, Any]]) -> int | None:
@@ -28,6 +29,22 @@ def extract_at_target(message: list[dict[str, Any]]) -> int | None:
 
 def zhuazhu_available(user: dict[str, Any]) -> int:
     return DAILY_ZHUA_LIMIT + int(user.get("daily_zhuazhu_extra", 0)) - int(user.get("daily_zhuazhu_used", 0))
+
+
+def holding_level(total: float) -> int:
+    return common.milestone_index(total)
+
+
+def level_name(level: int) -> str:
+    if level < 0:
+        return "未入门"
+    return common.MILESTONES[min(level, len(common.MILESTONES) - 1)][1]
+
+
+def level_gap_too_large(thief: dict[str, Any], target: dict[str, Any]) -> tuple[bool, str, str]:
+    thief_level = holding_level(common.total_holding(thief))
+    target_level = holding_level(common.total_holding(target))
+    return target_level - thief_level >= MAX_LEVEL_GAP, level_name(thief_level), level_name(target_level)
 
 
 def parse_add_args(arg: str) -> tuple[str, int] | None:
@@ -131,6 +148,12 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     target_idle = common.idle_state(target)
     target_total = common.total_holding(target)
     target_idle_total = common.idle_total_coins(target_idle)
+
+    blocked, thief_level, target_level = level_gap_too_large(thief, target)
+    if blocked:
+        zhubi.save_data(data)
+        await ctx["reply"](event, f"等级差距过大，无法抓取。你的等级：{thief_level}，对方等级：{target_level}。")
+        return
 
     if target_total <= 0:
         zhubi.save_data(data)

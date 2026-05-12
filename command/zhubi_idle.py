@@ -46,7 +46,7 @@ def idle_summary(state: dict[str, Any], balance: float) -> str:
         f"当前效率倍率：{common.idle_multiplier(state):.4f}x",
         f"每单位基础获取率：{common.idle_unit_rate(state):.6f}/秒",
         f"idle 每秒产出速度：{common.format_amount(growth_per_sec)}",
-        f"转生倍率：{1 + 0.15 * int(state.get('remakes', 0)):.2f}x",
+        f"转生倍率：{common.remake_multiplier(state):.2f}x",
         f"quality 等级：{common.level_label(int(state.get('quality', 0)))}，倍率：{common.quality_multiplier(state):.4f}x，下级价格：{common.format_amount(common.upgrade_cost('quality', int(state.get('quality', 0))))}",
         f"efficiency 等级：{common.level_label(int(state.get('efficiency', 0)))}，下级价格：{common.format_amount(common.upgrade_cost('efficiency', int(state.get('efficiency', 0))))}",
         f"speed 等级：{common.level_label(int(state.get('speed', 0)))}，下级价格：{common.format_amount(common.upgrade_cost('speed', int(state.get('speed', 0))))}",
@@ -166,22 +166,9 @@ async def handle_remake(event: dict[str, Any], ctx: dict[str, Any]) -> None:
         zhubi.save_data(data)
         await ctx["reply"](event, "你还没有通关 idle，不能转生。")
         return
-    remakes = int(state.get("remakes", 0)) + 1
-    user["balance"] = 0.0
-    user["idle"] = {
-        "coins": 0.0,
-        "max": 0.0,
-        "last_tick": common.SESSION_STARTED,
-        "quality": 0,
-        "efficiency": 0,
-        "speed": 0,
-        "remakes": remakes,
-        "cleared": False,
-        "last_milestone": -1,
-        "group_id": int(event.get("group_id", 0)) if event.get("message_type") == "group" else 0,
-    }
+    remakes = common.remake_user(user, int(event.get("group_id", 0)) if event.get("message_type") == "group" else 0)
     zhubi.save_data(data)
-    await ctx["reply"](event, f"转生完成。已清空所有钱包与 idle 猪币，当前转生次数：{remakes}，基础数值倍率：{1 + 0.15 * remakes:.2f}x。")
+    await ctx["reply"](event, f"转生完成。已清空所有钱包与 idle 猪币，当前转生次数：{remakes}，基础数值倍率：{1 + common.REMAKE_STEP * remakes:.2f}x。")
 
 
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
@@ -218,6 +205,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 COMMAND = {
     "name": "/zhubi_idle",
     "usage": "/zhubi_idle [in/out <数量或nMAX+数字> | buy update quality|efficiency|speed | remake]",
-    "description": "猪币放置游戏：投入猪币每秒按idle存量产出到主钱包，基础0.0001/单位，可买quality(每级+基础值10%)/efficiency(每级+0.00005)/speed(×1.025)升级，2147483647MAX通关后转生(×1.15)。",
+    "description": "猪币放置游戏：投入猪币每秒按idle存量产出到主钱包，基础0.000025/单位，可买quality(每级+7.5%倍率)/efficiency(每级+0.000025)/speed(×1.025)升级，主钱包或idle超过2147483647MAX时强制转生(每次转生×1.15)。",
     "handler": handler,
 }
