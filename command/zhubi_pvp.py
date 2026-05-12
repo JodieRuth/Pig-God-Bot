@@ -16,6 +16,8 @@ zhubi = common.zhubi
 
 PENDING_TTL = 15 * 60
 DAILY_PVP_LIMIT = 3
+PVP_NORMAL_MAX_RATIO = 10000
+PVP_MAX_UNIT_MAX_RATIO = 100
 
 
 async def group_member(ctx: dict[str, Any], group_id: int, user_id: int) -> dict[str, Any] | None:
@@ -93,6 +95,13 @@ def win_probability(amount_a: int, amount_b: int) -> float:
     return min(0.75, max(0.25, amount_a / total))
 
 
+def pvp_amount_gap_too_large(amount_a: int, amount_b: int) -> bool:
+    smaller = max(1, min(amount_a, amount_b))
+    larger = max(amount_a, amount_b)
+    max_ratio = PVP_MAX_UNIT_MAX_RATIO if larger > common.MAX_UNIT else PVP_NORMAL_MAX_RATIO
+    return larger / smaller >= max_ratio
+
+
 def parse_add_args(arg: str) -> tuple[str, int] | None:
     parts = arg.split()
     if len(parts) != 3 or parts[0].lower() != "add":
@@ -151,12 +160,14 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     challenger_id = str(event.get("user_id", 0))
     message = event.get("message", [])
     at_target = extract_at_target(message)
-    if at_target is not None:
+    parts = arg.split()
+    if len(parts) >= 2 and any(part.isdigit() for part in parts[:-1]):
+        target_id = next(part for part in parts[:-1] if part.isdigit())
+        amount = common.parse_positive_int(parts[-1])
+    elif at_target is not None:
         target_id = str(at_target)
-        parts = arg.split()
         amount = common.parse_positive_int(parts[-1]) if parts else None
     else:
-        parts = arg.split()
         if len(parts) != 2 or not parts[0].isdigit():
             await ctx["reply"](event, "用法：/zhubi_pvp <QQ号或@某人> <猪币数量或nMAX+数字>；仅所有者：/zhubi_pvp add <QQ号> <今日额外次数>")
             return
@@ -194,6 +205,11 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             delete_pending(data, store, key)
             zhubi.save_data(data)
             await ctx["reply"](event, f"{target_name} 猪币不足，PVP 已取消。")
+            return
+        if pvp_amount_gap_too_large(amount, pending_amount):
+            delete_pending(data, store, key)
+            zhubi.save_data(data)
+            await ctx["reply"](event, "双方投入差距过大，这场比赛并不公平，已被取消")
             return
         challenger_probability = win_probability(amount, pending_amount)
         challenger_wins = random.random() < challenger_probability

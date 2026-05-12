@@ -64,7 +64,10 @@ async def notify_milestones(event: dict[str, Any], ctx: dict[str, Any], notifica
     for user_id, notify_group_id, label, total in notifications:
         if notify_group_id != group_id:
             continue
-        await ctx["reply"](event, f"[CQ:at,qq={user_id}] 您已持有{common.format_amount(total)}，恭喜达到{label}")
+        if label == "自动转生":
+            await ctx["reply"](event, f"[CQ:at,qq={user_id}] 恭喜您通关，现已为您自动转生")
+        else:
+            await ctx["reply"](event, f"[CQ:at,qq={user_id}] 您已持有{common.format_amount(total)}，恭喜达到{label}")
 
 
 def parse_amount(parts: list[str]) -> float | None:

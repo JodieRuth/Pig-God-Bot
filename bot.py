@@ -2157,11 +2157,12 @@ async def zhubi_idle_tick_loop() -> None:
             notifications = common.apply_idle_income(data)
             common.zhubi.save_data(data)
             for user_id, group_id, label, total in notifications:
+                text = " 恭喜您通关，现已为您自动转生" if label == "自动转生" else f" 您已持有{common.format_amount(total)}，恭喜达到{label}"
                 await onebot_post("send_group_msg", {
                     "group_id": group_id,
                     "message": [
                         {"type": "at", "data": {"qq": user_id}},
-                        {"type": "text", "data": {"text": f" 您已持有{common.format_amount(total)}，恭喜达到{label}"}},
+                        {"type": "text", "data": {"text": text}},
                     ],
                 })
         except asyncio.CancelledError:
