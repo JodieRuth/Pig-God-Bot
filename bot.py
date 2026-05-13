@@ -463,6 +463,7 @@ class RpmLimiter:
 MAX_CONTEXT_MESSAGES = 30
 MAX_CONTEXT_AGE_SECONDS = 30 * 60
 MAX_CONTEXT_IMAGES = 10
+IMAGE_SENDER_CACHE_TTL_SECONDS = 60 * 60
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 LLM_MAX_RPM = int(os.getenv("LLM_MAX_RPM", "30"))
 LLM_RPM_LIMITER = RpmLimiter(LLM_MAX_RPM)
@@ -1122,13 +1123,34 @@ def cache_sender_images(key: str, sender_id: int, records: list[dict[str, Any]])
     if not records:
         return
     bucket = last_images_by_sender[(key, sender_id)]
+    now = time.time()
     for record in records:
-        bucket.append(record)
+        bucket.append({"record": record, "time": now})
+    while bucket and now - float(bucket[0].get("time", now)) > IMAGE_SENDER_CACHE_TTL_SECONDS:
+        bucket.popleft()
     log(f"Cached last images for sender: scope={key} user={sender_id} count={len(bucket)}")
 
 
 def visible_images_for_sender(key: str, sender_id: int) -> list[dict[str, Any]]:
-    indexed = [record for record in last_images_by_sender.get((key, sender_id), []) if image_path(record).exists()]
+    now = time.time()
+    indexed: list[dict[str, Any]] = []
+    bucket = last_images_by_sender.get((key, sender_id), [])
+    expired = False
+    for item in list(bucket):
+        record = item.get("record") if isinstance(item, dict) else item
+        timestamp = float(item.get("time", 0)) if isinstance(item, dict) else 0.0
+        if not isinstance(record, dict) or not image_path(record).exists():
+            expired = True
+            continue
+        if now - timestamp > IMAGE_SENDER_CACHE_TTL_SECONDS:
+            expired = True
+            continue
+        indexed.append(record)
+    if expired:
+        if indexed:
+            last_images_by_sender[(key, sender_id)] = deque(({"record": record, "time": now} for record in indexed), maxlen=MAX_CONTEXT_IMAGES)
+        else:
+            last_images_by_sender.pop((key, sender_id), None)
     if indexed:
         return indexed[-MAX_CONTEXT_IMAGES:]
     images: list[dict[str, Any]] = []
@@ -1677,10 +1699,16 @@ def select_llm_images(key: str, sender_id: int, current_images: list[dict[str, A
     if current_images:
         return current_images[:MAX_CONTEXT_IMAGES]
     sender_images = visible_images_for_sender(key, sender_id)
-    if sender_images:
+    if len(sender_images) >= MAX_CONTEXT_IMAGES:
         return sender_images[:MAX_CONTEXT_IMAGES]
     _, recent_images = recent_context(key)
-    return recent_images[:MAX_CONTEXT_IMAGES]
+    merged: list[dict[str, Any]] = []
+    for record in sender_images + recent_images:
+        if record not in merged:
+            merged.append(record)
+        if len(merged) >= MAX_CONTEXT_IMAGES:
+            break
+    return merged
 
 
 def select_tool_images(images: list[dict[str, Any]], image_indexes: list[Any]) -> list[dict[str, Any]]:

@@ -44,7 +44,7 @@ def level_name(level: int) -> str:
 def level_gap_too_large(thief: dict[str, Any], target: dict[str, Any]) -> tuple[bool, str, str]:
     thief_level = holding_level(common.total_holding(thief))
     target_level = holding_level(common.total_holding(target))
-    return target_level - thief_level >= MAX_LEVEL_GAP, level_name(thief_level), level_name(target_level)
+    return abs(target_level - thief_level) > MAX_LEVEL_GAP, level_name(thief_level), level_name(target_level)
 
 
 def parse_add_args(arg: str) -> tuple[str, int] | None:
