@@ -1245,6 +1245,7 @@ function characterSearchSummary(character, extra = {}) {
     aliases: splitAliases(character.aliases).slice(0, 5),
     sex: character.sex,
     gender: character.gender,
+    birthday: character.birthday,
     score: character.score,
     vns: character.vns.slice(0, 5).map(([id, role, spoiler]) => ({ id, vndbid: `v${id}`, role, spoiler, title: vnById.get(id)?.title ?? null })),
     ...extra
@@ -1264,8 +1265,9 @@ function searchItems(input) {
   const detail = Boolean(input.detail ?? false);
   const birthMonthsVec = (input.birthMonths ?? input.birthMonth) != null ? asArray(input.birthMonths ?? input.birthMonth).map(Number).filter((n) => n >= 1 && n <= 12) : null;
   const birthDaysVec = (input.birthDays ?? input.birthDay) != null ? asArray(input.birthDays ?? input.birthDay).map(Number).filter((n) => n >= 1 && n <= 31) : null;
-  if (!q) return { mode, query: q, results: [] };
-  if (mode === 'vn' || mode === 'game') {
+  const hasBirthdayFilter = (birthMonthsVec != null || birthDaysVec != null);
+  if (!q && !hasBirthdayFilter) return { mode, query: q, results: [] };
+  if ((mode === 'vn' || mode === 'game') && !hasBirthdayFilter) {
     const results = isVnId(q) ? data.vns.filter((vn) => vn.id === idOf(q)) : data.vns.filter((vn) => vnSearchRank(vn, q) > 0).sort(compareVnSearchResult(q));
     const selected = results.slice(0, limit);
     return { mode: 'vn', query: q, results: searchOutput(selected, (vn) => vnSearchSummary(vn, { searchRank: vnSearchRank(vn, q), exactRank: vnExactSearchRank(vn, q) }), (vn) => slimVn(vn, { searchRank: vnSearchRank(vn, q), exactRank: vnExactSearchRank(vn, q) }, detail), detail) };
@@ -1274,16 +1276,24 @@ function searchItems(input) {
     const selected = data.characters.filter((character) => character.id === idOf(q) && birthdayMatches(character, birthMonthsVec, birthDaysVec)).slice(0, limit);
     return { mode: 'character', query: q, results: searchOutput(selected, (character) => characterSearchSummary(character, { exactRank: characterExactSearchRank(character, q) }), (character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail), detail) };
   }
-  const directCharacters = data.characters.filter((character) => characterSearchMatch(character, q) && birthdayMatches(character, birthMonthsVec, birthDaysVec)).sort(compareCharacterSearchResult(q));
-  if (directCharacters.length || mode === 'characterOnly') {
-    const selected = directCharacters.slice(0, limit);
-    return { mode: 'character', query: q, results: searchOutput(selected, (character) => characterSearchSummary(character, { exactRank: characterExactSearchRank(character, q) }), (character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail), detail) };
+  if (!q && hasBirthdayFilter) {
+    const results = data.characters.filter((character) => birthdayMatches(character, birthMonthsVec, birthDaysVec)).sort((a, b) => characterDisplayScore(b, false) - characterDisplayScore(a, false));
+    const selected = results.slice(0, limit);
+    return { mode: 'character', query: q, results: searchOutput(selected, (character) => characterSearchSummary(character), (character) => slimCharacter(character, {}, detail), detail) };
   }
-  const matchedVns = data.vns.filter((vn) => vnSearchRank(vn, q) > 0).sort(compareVnSearchResult(q)).slice(0, 30);
-  const matchedVnRank = new Map(matchedVns.map((vn, index) => [vn.id, matchedVns.length - index]));
-  const fallback = data.characters.filter((character) => character.vns.some(([id]) => matchedVnRank.has(id)) && birthdayMatches(character, birthMonthsVec, birthDaysVec)).sort((a, b) => Math.max(0, ...b.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(b, false) - (Math.max(0, ...a.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(a, false)));
-  const selected = fallback.slice(0, limit);
-  return { mode: 'character', query: q, fallbackFromVnSearch: true, results: searchOutput(selected, (character) => characterSearchSummary(character), (character) => slimCharacter(character, {}, detail), detail) };
+  if (q) {
+    const directCharacters = data.characters.filter((character) => characterSearchMatch(character, q) && birthdayMatches(character, birthMonthsVec, birthDaysVec)).sort(compareCharacterSearchResult(q));
+    if (directCharacters.length || mode === 'characterOnly') {
+      const selected = directCharacters.slice(0, limit);
+      return { mode: 'character', query: q, results: searchOutput(selected, (character) => characterSearchSummary(character, { exactRank: characterExactSearchRank(character, q) }), (character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail), detail) };
+    }
+    const matchedVns = data.vns.filter((vn) => vnSearchRank(vn, q) > 0).sort(compareVnSearchResult(q)).slice(0, 30);
+    const matchedVnRank = new Map(matchedVns.map((vn, index) => [vn.id, matchedVns.length - index]));
+    const fallback = data.characters.filter((character) => character.vns.some(([id]) => matchedVnRank.has(id)) && birthdayMatches(character, birthMonthsVec, birthDaysVec)).sort((a, b) => Math.max(0, ...b.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(b, false) - (Math.max(0, ...a.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(a, false)));
+    const selected = fallback.slice(0, limit);
+    return { mode: 'character', query: q, fallbackFromVnSearch: true, results: searchOutput(selected, (character) => characterSearchSummary(character), (character) => slimCharacter(character, {}, detail), detail) };
+  }
+  return { mode, query: q, results: [] };
 }
 
 function searchMeta(input) {
