@@ -42,6 +42,24 @@ const asArray = (value) => Array.isArray(value) ? value : value == null ? [] : [
 const uniqueNumbers = (value) => [...new Set(asArray(value).map((item) => Number(String(item).replace(/^[vc]/i, ''))).filter(Number.isFinite))];
 const defaultRoleFilter = () => ({ primary: true, main: true, side: true, appears: false });
 
+function parseBirthday(birthdayStr) {
+  const num = Number(birthdayStr);
+  if (!num || num < 1) return null;
+  const month = Math.floor(num / 100);
+  const day = num % 100;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return { month, day };
+}
+
+function birthdayMatches(character, birthMonths, birthDays) {
+  if (birthMonths == null && birthDays == null) return true;
+  const parsed = parseBirthday(character.birthday);
+  if (!parsed) return false;
+  const monthMatch = birthMonths == null || birthMonths.length === 0 || birthMonths.includes(parsed.month);
+  const dayMatch = birthDays == null || birthDays.length === 0 || birthDays.includes(parsed.day);
+  return monthMatch && dayMatch;
+}
+
 function jsonResponse(response, status, payload) {
   const body = JSON.stringify(payload);
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'content-type' });
@@ -843,7 +861,7 @@ function computeCharacterRecommendations(params, includeSpoiler, selectedCharact
   const referenceDeveloperIds = selectedCharacterDeveloperIds(params.selectedCharacterIds);
   const lists = [];
   for (const activeCharacterProfile of activeCharacterProfiles) {
-    const candidates = data.characters.filter((character) => !selectedCharacterIdSet.has(character.id) && !negativeCharacterIdSet.has(character.id) && characterHasQualifiedVn(character, params.minVotes)).filter((character) => {
+    const candidates = data.characters.filter((character) => !selectedCharacterIdSet.has(character.id) && !negativeCharacterIdSet.has(character.id) && characterHasQualifiedVn(character, params.minVotes) && birthdayMatches(character, params.birthMonths, params.birthDays)).filter((character) => {
       if (!negativePriorityTraitIds.size) return true;
       const vector = makeVector(character.traits, traitMeta, 'trait', includeSpoiler, true, exclusionVisibleTraitIds);
       return ![...negativePriorityTraitIds].some((id) => vector.has(id));
@@ -959,7 +977,9 @@ function defaultParams(input) {
     tagRoleFilter: { ...defaultRoleFilter(), ...(input.tagRoleFilter ?? input.roleFilter ?? {}) },
     preferCharacterAverage: Boolean(input.preferCharacterAverage ?? true),
     resultSort: input.resultSort ?? input.sort ?? 'relevance',
-    sortDirection: input.sortDirection ?? input.direction ?? 'desc'
+    sortDirection: input.sortDirection ?? input.direction ?? 'desc',
+    birthMonths: (input.birthMonths ?? input.birthMonth) != null ? asArray(input.birthMonths ?? input.birthMonth).map(Number).filter((n) => n >= 1 && n <= 12) : null,
+    birthDays: (input.birthDays ?? input.birthDay) != null ? asArray(input.birthDays ?? input.birthDay).map(Number).filter((n) => n >= 1 && n <= 31) : null
   };
 }
 
@@ -994,6 +1014,7 @@ function computeVariant(params, includeSpoiler) {
     const character = data.characters[index];
     if (!characterHasQualifiedVn(character, params.minVotes, params.tagRoleFilter)) return null;
     if (excludedTagSearchTraitIds.size && [...excludedTagSearchTraitIds].some((id) => traitSearchIndex.vectors[index].has(id))) return null;
+    if (!birthdayMatches(character, params.birthMonths, params.birthDays)) return null;
     const vector = traitSearchIndex.vectors[index];
     const priorityMatched = groupedPriorityMatch(tagSearchTraitGroups, vector);
     const priorityTotal = tagSearchTraitGroups.length;
@@ -1241,6 +1262,8 @@ function searchItems(input) {
   const q = text(input.name ?? input.query ?? input.q);
   const limit = Math.max(1, Number(input.limit ?? input.n ?? 20));
   const detail = Boolean(input.detail ?? false);
+  const birthMonthsVec = (input.birthMonths ?? input.birthMonth) != null ? asArray(input.birthMonths ?? input.birthMonth).map(Number).filter((n) => n >= 1 && n <= 12) : null;
+  const birthDaysVec = (input.birthDays ?? input.birthDay) != null ? asArray(input.birthDays ?? input.birthDay).map(Number).filter((n) => n >= 1 && n <= 31) : null;
   if (!q) return { mode, query: q, results: [] };
   if (mode === 'vn' || mode === 'game') {
     const results = isVnId(q) ? data.vns.filter((vn) => vn.id === idOf(q)) : data.vns.filter((vn) => vnSearchRank(vn, q) > 0).sort(compareVnSearchResult(q));
@@ -1248,17 +1271,17 @@ function searchItems(input) {
     return { mode: 'vn', query: q, results: searchOutput(selected, (vn) => vnSearchSummary(vn, { searchRank: vnSearchRank(vn, q), exactRank: vnExactSearchRank(vn, q) }), (vn) => slimVn(vn, { searchRank: vnSearchRank(vn, q), exactRank: vnExactSearchRank(vn, q) }, detail), detail) };
   }
   if (isCharId(q)) {
-    const selected = data.characters.filter((character) => character.id === idOf(q)).slice(0, limit);
+    const selected = data.characters.filter((character) => character.id === idOf(q) && birthdayMatches(character, birthMonthsVec, birthDaysVec)).slice(0, limit);
     return { mode: 'character', query: q, results: searchOutput(selected, (character) => characterSearchSummary(character, { exactRank: characterExactSearchRank(character, q) }), (character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail), detail) };
   }
-  const directCharacters = data.characters.filter((character) => characterSearchMatch(character, q)).sort(compareCharacterSearchResult(q));
+  const directCharacters = data.characters.filter((character) => characterSearchMatch(character, q) && birthdayMatches(character, birthMonthsVec, birthDaysVec)).sort(compareCharacterSearchResult(q));
   if (directCharacters.length || mode === 'characterOnly') {
     const selected = directCharacters.slice(0, limit);
     return { mode: 'character', query: q, results: searchOutput(selected, (character) => characterSearchSummary(character, { exactRank: characterExactSearchRank(character, q) }), (character) => slimCharacter(character, { exactRank: characterExactSearchRank(character, q) }, detail), detail) };
   }
   const matchedVns = data.vns.filter((vn) => vnSearchRank(vn, q) > 0).sort(compareVnSearchResult(q)).slice(0, 30);
   const matchedVnRank = new Map(matchedVns.map((vn, index) => [vn.id, matchedVns.length - index]));
-  const fallback = data.characters.filter((character) => character.vns.some(([id]) => matchedVnRank.has(id))).sort((a, b) => Math.max(0, ...b.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(b, false) - (Math.max(0, ...a.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(a, false)));
+  const fallback = data.characters.filter((character) => character.vns.some(([id]) => matchedVnRank.has(id)) && birthdayMatches(character, birthMonthsVec, birthDaysVec)).sort((a, b) => Math.max(0, ...b.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(b, false) - (Math.max(0, ...a.vns.map(([id]) => matchedVnRank.get(id) ?? 0)) * 1000 + characterDisplayScore(a, false)));
   const selected = fallback.slice(0, limit);
   return { mode: 'character', query: q, fallbackFromVnSearch: true, results: searchOutput(selected, (character) => characterSearchSummary(character), (character) => slimCharacter(character, {}, detail), detail) };
 }

@@ -420,6 +420,8 @@ def search_definition() -> dict[str, Any]:
             "name": {"type": "string", "description": "名称、别名、原名或 VNDB ID，例如 白色相簿、冬馬かずさ、v2920、c35176。"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 10, "description": "返回数量，默认 10，最多 10。"},
             "detail": {"type": "boolean", "description": "兼容参数。搜索结果会被清洗为精简候选，不返回 tags/traits 元数据或描述。"},
+            "birthMonth": {"type": "array", "items": {"type": "integer"}, "description": "角色生日月份过滤，1-12。可传单个值或数组。例如 [9] 只返回9月出生的角色。仅对 mode=character 生效。"},
+            "birthDay": {"type": "array", "items": {"type": "integer"}, "description": "角色生日日期过滤，1-31。可传单个值或数组。若与 birthMonth 同时指定，则角色必须同时满足月份和日期。仅对 mode=character 生效。"},
         },
         ["mode", "name"],
     )
@@ -463,6 +465,8 @@ def recommend_definition() -> dict[str, Any]:
             "direction": {"type": "string", "enum": ["desc", "asc"], "description": "排序方向，默认 desc。"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 10, "description": "返回数量，默认 10，最多 10。"},
             "detail": {"type": "boolean", "description": "兼容参数。推荐结果会被清洗为前十条候选，tag/trait 仅以父级标题分组列出标题，不返回描述。"},
+            "birthMonth": {"type": "array", "items": {"type": "integer"}, "description": "角色生日月份过滤，1-12。可传单个值或数组。例如 [9] 只返回9月出生的角色。仅对角色推荐生效；VN 推荐忽略此参数。"},
+            "birthDay": {"type": "array", "items": {"type": "integer"}, "description": "角色生日日期过滤，1-31。可传单个值或数组。若与 birthMonth 同时指定，则角色必须同时满足月份和日期。仅对角色推荐生效；VN 推荐忽略此参数。"},
         },
     )
 
@@ -487,6 +491,8 @@ def tag_search_definition() -> dict[str, Any]:
             "direction": {"type": "string", "enum": ["desc", "asc"], "description": "排序方向，默认 desc。"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 10, "description": "返回数量，默认 10，最多 10。"},
             "detail": {"type": "boolean", "description": "兼容参数。检索结果会被清洗为前十条候选，tag/trait 仅以父级标题分组列出标题，不返回描述。"},
+            "birthMonth": {"type": "array", "items": {"type": "integer"}, "description": "角色生日月份过滤，1-12。可传单个值或数组。例如 [9] 只返回9月出生的角色。仅对角色/混合检索结果生效。"},
+            "birthDay": {"type": "array", "items": {"type": "integer"}, "description": "角色生日日期过滤，1-31。可传单个值或数组。若与 birthMonth 同时指定，则角色必须同时满足月份和日期。仅对角色/混合检索结果生效。"},
         },
     )
 
