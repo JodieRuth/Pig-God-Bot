@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TOOL_DESCRIPTION = "直接把 LLM 当前可见的一张输入图片原样发到当前会话，可选择是否作为对指定上下文消息的回复发送，并可附带一段文字。适用于用户要求把上文某张图直接发出来、转发出来、贴出来，或判断不需要生图/改图、只需要发送它能看到的输入图片时。image_index 必须来自当前输入图片编号：图1 是第一张输入图片，图2 是第二张。调用成功后机器人已经完成本轮回答，不需要再输出普通文本。"
+TOOL_DESCRIPTION = "直接把 LLM 当前可见的一张或多张输入图片原样发到当前会话，可选择是否作为对指定上下文消息的回复发送，并可附带一段文字。适用于用户要求把上文某张/多张图直接发出来、转发出来、贴出来，或判断不需要生图/改图、只需要发送它能看到的输入图片时。image_index/image_indexes 必须来自当前输入图片编号：图1 是第一张输入图片，图2 是第二张。调用成功后机器人已经完成本轮回答，不需要再输出普通文本。"
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -29,10 +29,15 @@ def definition(ctx: dict[str, Any]) -> dict[str, Any]:
                     },
                     "image_index": {
                         "type": "integer",
-                        "description": "要发送的图片编号，来自当前输入图片顺序：图1 是第一张输入图片，图2 是第二张，以此类推。",
+                        "description": "要发送的单张图片编号，来自当前输入图片顺序：图1 是第一张输入图片，图2 是第二张，以此类推。发送多张时优先使用 image_indexes。",
+                    },
+                    "image_indexes": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "要一次性发送的多张图片编号列表，例如 [1,2,3]。编号来自当前输入图片顺序。纯单张也可以只填 image_index。",
                     },
                 },
-                "required": ["reply", "text", "image_index"],
+                "required": ["reply", "text"],
             },
         },
     }
@@ -73,6 +78,30 @@ def selected_image(runtime: dict[str, Any], image_index: Any) -> dict[str, Any] 
     return image if isinstance(image, dict) else None
 
 
+def image_index_values(args: dict[str, Any]) -> list[Any]:
+    values = args.get("image_indexes")
+    if isinstance(values, list):
+        return values
+    if values is not None:
+        return [values]
+    return [args.get("image_index")]
+
+
+def selected_images(runtime: dict[str, Any], args: dict[str, Any]) -> tuple[list[dict[str, Any]], list[int]]:
+    selected: list[dict[str, Any]] = []
+    indexes: list[int] = []
+    for value in image_index_values(args):
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        image = selected_image(runtime, index)
+        if image is not None and image not in selected:
+            selected.append(image)
+            indexes.append(index)
+    return selected, indexes
+
+
 def bool_arg(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "是", "回复"}
@@ -84,18 +113,19 @@ def image_segment(image: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
     return {"type": "image", "data": {"file": path.as_uri()}}
 
 
-def message_segments(text: str, image: dict[str, Any], ctx: dict[str, Any]) -> list[dict[str, Any]]:
+def message_segments(text: str, images: list[dict[str, Any]], ctx: dict[str, Any]) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
     if text:
         segments.append({"type": "text", "data": {"text": f"{text}\n"}})
-    segments.append(image_segment(image, ctx))
+    for image in images:
+        segments.append(image_segment(image, ctx))
     return segments
 
 
 async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
-    image = selected_image(runtime, args.get("image_index"))
-    if image is None:
-        return {"ok": False, "content": "发送图片失败：image_index 不在当前可用图片编号中。"}
+    images, indexes = selected_images(runtime, args)
+    if not images:
+        return {"ok": False, "content": "发送图片失败：image_index/image_indexes 不在当前可用图片编号中。"}
     text = str(args.get("text") or "").strip()
     should_reply = bool_arg(args.get("reply"))
     message_id = str(args.get("message_id") or args.get("reply_message_id") or "").strip()
@@ -106,7 +136,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
         if allowed_ids and message_id not in allowed_ids:
             return {"ok": False, "content": f"发送图片失败：message_id {message_id} 不在当前上下文消息列表中。"}
     try:
-        segments = message_segments(text, image, ctx)
+        segments = message_segments(text, images, ctx)
         if should_reply:
             await ctx["reply_to_message"](runtime["event"], message_id, segments)
         else:
@@ -116,8 +146,8 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
     return {
         "ok": True,
         "answered": True,
-        "content": "已发送指定输入图片。",
+        "content": f"已发送指定输入图片 {len(images)} 张。",
         "reply": should_reply,
         "message_id": message_id if should_reply else "",
-        "image_index": int(args.get("image_index")),
+        "image_indexes": indexes,
     }
