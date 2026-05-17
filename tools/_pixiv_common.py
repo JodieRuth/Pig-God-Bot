@@ -21,6 +21,7 @@ MAX_CANDIDATES_PER_COLLAGE = 25
 MAX_COLLAGES = 4
 MAX_SEARCH_CANDIDATES = MAX_CANDIDATES_PER_COLLAGE * MAX_COLLAGES
 PIXIV_TIMEOUT = aiohttp.ClientTimeout(total=int(os.getenv("PIXIV_TIMEOUT_SECONDS", "45")))
+PIXIV_USE_SYSTEM_PROXY = os.getenv("PIXIV_USE_SYSTEM_PROXY", "1") != "0"
 PIXIV_COOKIE = os.getenv("PIXIV_COOKIE", "").strip()
 PIXIV_ACCEPT_LANGUAGE = os.getenv("PIXIV_ACCEPT_LANGUAGE", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7")
 SEARCH_CACHE_TTL_SECONDS = int(os.getenv("PIXIV_SEARCH_CACHE_TTL_SECONDS", "1800"))
@@ -48,13 +49,31 @@ BLOCKED_TAGS = {
 SORT_ALIASES = {
     "safe_relevance": "safe_relevance",
     "relevance": "safe_relevance",
+    "相关": "safe_relevance",
+    "相关优先": "safe_relevance",
     "date_desc": "date_desc",
     "date": "date_desc",
+    "new": "date_desc",
+    "newest": "date_desc",
+    "latest": "date_desc",
+    "最新": "date_desc",
+    "新图": "date_desc",
+    "优先新图": "date_desc",
     "bookmark_desc": "bookmark_desc",
     "bookmarks": "bookmark_desc",
+    "bookmark": "bookmark_desc",
+    "收藏": "bookmark_desc",
+    "收藏优先": "bookmark_desc",
     "popular_safe": "popular_safe",
     "popular": "popular_safe",
+    "popularity": "popular_safe",
+    "hot": "popular_safe",
+    "热门": "popular_safe",
+    "人气": "popular_safe",
+    "人气优先": "popular_safe",
     "tag_match": "tag_match",
+    "tag": "tag_match",
+    "标签匹配": "tag_match",
 }
 
 
@@ -210,6 +229,11 @@ def numeric_score(value: Any) -> int:
         return 0
 
 
+def normalize_sort(value: Any) -> str:
+    key = str(value or "safe_relevance").strip().lower()
+    return SORT_ALIASES.get(key, "safe_relevance")
+
+
 def search_score(item: dict[str, Any], query: str, sort: str) -> tuple[Any, ...]:
     title = str(item.get("title") or "").lower()
     tags = " ".join(str(tag) for tag in item.get("tags", [])).lower()
@@ -230,7 +254,7 @@ def search_score(item: dict[str, Any], query: str, sort: str) -> tuple[Any, ...]
 
 
 async def fetch_json(url: str, params: dict[str, Any] | None = None) -> Any:
-    async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=REQUEST_HEADERS, trust_env=True) as session:
+    async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=REQUEST_HEADERS, trust_env=PIXIV_USE_SYSTEM_PROXY) as session:
         async with session.get(url, params=params) as resp:
             text = await resp.text()
             if resp.status >= 400:
@@ -238,9 +262,10 @@ async def fetch_json(url: str, params: dict[str, Any] | None = None) -> Any:
             return json.loads(text)
 
 
-async def pixiv_search_tag(tag: str, pages: int, sort: str) -> list[dict[str, Any]]:
-    sort = SORT_ALIASES.get(sort, "safe_relevance")
+async def pixiv_search_tag(tag: str, pages: int, sort: str, min_bookmarks: int = 0) -> list[dict[str, Any]]:
+    sort = normalize_sort(sort)
     pages = limited_int(pages, 1, 1, MAX_COLLAGES)
+    min_bookmarks = limited_int(min_bookmarks, 0, 0, 1_000_000)
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
     for page in range(1, pages + 1):
@@ -261,6 +286,8 @@ async def pixiv_search_tag(tag: str, pages: int, sort: str) -> list[dict[str, An
                 continue
             item = normalize_search_item(raw)
             if not item or item["pid"] in seen:
+                continue
+            if int(item.get("bookmark_count") or 0) < min_bookmarks:
                 continue
             seen.add(item["pid"])
             collected.append(item)
@@ -363,7 +390,7 @@ async def download_url(url: str, target_dir: Path, prefix: str) -> Path:
     if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
         suffix = ".jpg"
     target = target_dir / f"{prefix}_{uuid.uuid4().hex}{suffix}"
-    async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=IMAGE_HEADERS, trust_env=True) as session:
+    async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=IMAGE_HEADERS, trust_env=PIXIV_USE_SYSTEM_PROXY) as session:
         async with session.get(url) as resp:
             if resp.status >= 400:
                 text = await resp.text()
