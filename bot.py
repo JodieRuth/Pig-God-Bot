@@ -1534,6 +1534,54 @@ def extract_images_api_result(value: Any) -> str | None:
     return None
 
 
+def clean_image_result_url(value: Any) -> str:
+    text = str(value or "").strip().strip("`'\"").strip()
+    return text if text.startswith(("http://", "https://")) else ""
+
+
+def extract_images_api_url(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("url", "image_url", "imageUrl"):
+            url = clean_image_result_url(value.get(key))
+            if url:
+                return url
+        for key in ("output", "data", "item", "response", "content"):
+            result = extract_images_api_url(value.get(key))
+            if result:
+                return result
+        for nested in value.values():
+            result = extract_images_api_url(nested)
+            if result:
+                return result
+    elif isinstance(value, list):
+        for item in value:
+            result = extract_images_api_url(item)
+            if result:
+                return result
+    return None
+
+
+def is_data_image_url(value: str) -> bool:
+    return value.startswith("data:image/") and ";base64," in value
+
+
+async def download_generated_image_url(url: str, target: Path) -> None:
+    async with aiohttp.ClientSession(trust_env=True) as session:
+        async with session.get(url, timeout=60 * 10) as resp:
+            body = await resp.read()
+            if resp.status >= 400:
+                detail = sanitize_error_detail(body.decode("utf-8", errors="replace"), 500)
+                raise RuntimeError(f"图片 URL 下载失败 HTTP {resp.status}: {detail}")
+            target.write_bytes(body)
+
+
+def write_image_result_to_file(image_result: str, target: Path) -> None:
+    value = str(image_result or "").strip()
+    if is_data_image_url(value):
+        value = value.split(";base64,", 1)[1]
+    target.write_bytes(base64.b64decode(value))
+
+
 def build_image_generation_input(prompt: str, image_paths: list[Path]) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
     for path in image_paths:
@@ -1704,7 +1752,7 @@ async def parse_images_api_sse(resp: aiohttp.ClientResponse) -> str:
         recent_events.append(summarize_image_event_brief(event))
         if any(keyword in event_type.lower() for keyword in ("error", "failed", "rejected", "abort")) or isinstance(event.get("error"), dict):
             error_events.append(summarize_image_event_brief(event))
-        image_data = extract_images_api_result(event)
+        image_data = extract_images_api_result(event) or extract_images_api_url(event)
         if image_data and "partial" not in event_type:
             final_image = image_data
     if not final_image:
@@ -1753,7 +1801,7 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
                     brief = summarize_image_error_payload(error_data) if error_data is not None else ""
                     detail = brief or sanitize_error_detail(error_text)
                     raise RuntimeError(f"HTTP {resp.status}: {detail}")
-                image_b64 = await parse_images_api_sse(resp)
+                image_ref = await parse_images_api_sse(resp)
             else:
                 body = await resp.read()
                 body_text = body.decode("utf-8", errors="replace")
@@ -1766,14 +1814,19 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
                     brief = summarize_image_error_payload(data)
                     detail = brief or sanitize_error_detail(body_text)
                     raise RuntimeError(f"HTTP {resp.status}: {detail}")
-                image_b64 = extract_images_api_result(data)
-                if not image_b64:
+                image_ref = extract_images_api_result(data) or extract_images_api_url(data)
+                if not image_ref:
                     brief = summarize_image_error_payload(data)
-                    detail = f"响应没有返回图片 base64：{brief}" if brief else f"响应没有返回图片 base64，响应：{sanitize_error_detail(data)}"
+                    detail = f"响应没有返回图片 base64/url：{brief}" if brief else f"响应没有返回图片 base64/url，响应：{sanitize_error_detail(data)}"
                     raise RuntimeError(detail)
 
             target = OUTPUT_DIR / f"{uuid.uuid4().hex}.png"
-            target.write_bytes(base64.b64decode(image_b64))
+            if is_data_image_url(image_ref):
+                write_image_result_to_file(image_ref, target)
+            elif image_ref.startswith(("http://", "https://")):
+                await download_generated_image_url(image_ref, target)
+            else:
+                write_image_result_to_file(image_ref, target)
             log(f"Image saved from Images API {mode}: {target}")
             return target
 
