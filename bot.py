@@ -1418,14 +1418,31 @@ def image_request_options() -> dict[str, Any]:
     return options
 
 
-def images_edit_payload(prompt: str, image_paths: list[Path], image_model: str) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+def images_edit_form_data(prompt: str, image_model: str) -> dict[str, Any]:
+    data: dict[str, Any] = {
         "model": image_model,
         "prompt": prompt,
-        "images": [{"image_url": image_data_url(path)} for path in image_paths],
     }
-    payload.update(image_request_options())
-    return payload
+    data.update(image_request_options())
+    return {key: str(value).lower() if isinstance(value, bool) else str(value) for key, value in data.items()}
+
+
+def images_edit_form(prompt: str, image_paths: list[Path], image_model: str) -> aiohttp.FormData:
+    form = aiohttp.FormData()
+    for key, value in images_edit_form_data(prompt, image_model).items():
+        form.add_field(key, value)
+    for path in image_paths:
+        form.add_field("image", path.read_bytes(), filename=path.name, content_type=image_content_type(path))
+    return form
+
+
+def image_content_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    return "image/png"
 
 
 def images_generation_payload(prompt: str, image_model: str) -> dict[str, Any]:
@@ -1649,12 +1666,14 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
     has_reference_images = bool(image_paths)
     request_url = image_api_url_for_mode(image_url, has_reference_images)
     headers = {"Authorization": f"Bearer {image_key}"} if image_key else {}
-    payload = images_edit_payload(prompt, image_paths, image_model) if has_reference_images else images_generation_payload(prompt, image_model)
+    payload = images_generation_payload(prompt, image_model)
+    form = images_edit_form(prompt, image_paths, image_model) if has_reference_images else None
     mode = "edits" if has_reference_images else "generations"
 
-    log_json("Image API request", {"url": request_url, "mode": mode, "model": image_model, "prompt": prompt, "images": [str(p) for p in image_paths], "options": image_request_options()})
+    log_json("Image API request", {"url": request_url, "mode": mode, "model": image_model, "prompt": prompt, "images": [str(p) for p in image_paths], "options": image_request_options(), "request_format": "multipart" if has_reference_images else "json"})
     async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.post(request_url, json=payload, timeout=60 * 30) as resp:
+        request_kwargs = {"data": form} if has_reference_images else {"json": payload}
+        async with session.post(request_url, **request_kwargs, timeout=60 * 30) as resp:
             content_type = resp.headers.get("content-type", "")
             log(f"Image API status={resp.status} mode={mode} content_type={content_type}")
             if "event-stream" in content_type:
