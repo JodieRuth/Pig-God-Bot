@@ -31,13 +31,7 @@ def balance_of_value(value: float) -> float:
 
 
 def format_number(value: int | float) -> str:
-    text = f"{truncate_decimal(value):.{DECIMAL_PRECISION}f}".rstrip("0").rstrip(".")
-    if not text:
-        text = "0"
-    if "." in text:
-        whole, decimal = text.split(".", 1)
-        return f"{int(whole):,}.{decimal}"
-    return f"{int(text):,}"
+    return f"{int(truncate_decimal(value)):,}"
 
 
 def format_balance(value: int | float) -> str:

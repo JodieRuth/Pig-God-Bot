@@ -2075,6 +2075,7 @@ def command_context() -> dict[str, Any]:
         "set_photo_enabled": set_photo_enabled,
         "photo_enabled": photo_enabled,
         "admin_users": ADMIN_USERS,
+        "bot_qq": BOT_QQ,
         "clear_contexts": contexts.clear,
         "clear_current_context": clear_current_context,
         "reboot_process": reboot_process,

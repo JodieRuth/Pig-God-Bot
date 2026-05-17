@@ -18,11 +18,11 @@ DAILY_ZHUA_LIMIT = 3
 MAX_LEVEL_GAP = 3
 
 
-def extract_at_target(message: list[dict[str, Any]]) -> int | None:
+def extract_at_target(message: list[dict[str, Any]], bot_qq: str = "") -> int | None:
     for seg in message:
         if seg.get("type") == "at":
             qq = str(seg.get("data", {}).get("qq") or "")
-            if qq.isdigit():
+            if qq.isdigit() and qq != bot_qq:
                 return int(qq)
     return None
 
@@ -67,7 +67,7 @@ async def handle_add(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> bo
     if not arg.strip().lower().startswith("add"):
         return False
     if not ctx["is_admin_event"](event):
-        await ctx["reply"](event, "你没有权限使用抓抓次数管理指令。")
+        await ctx["reply"](event, "你没有权限使用抓猪次数管理指令。")
         return True
     parsed = parse_add_args(arg)
     if parsed is None:
@@ -78,7 +78,7 @@ async def handle_add(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> bo
     target = zhubi.user_data(data, target_id)
     target["daily_zhuazhu_extra"] = int(target.get("daily_zhuazhu_extra", 0)) + amount
     zhubi.save_data(data)
-    await ctx["reply"](event, f"已为 QQ {target_id} 增加今日抓抓次数 {amount} 次，今日剩余：{max(0, zhuazhu_available(target))} 次。")
+    await ctx["reply"](event, f"已为 QQ {target_id} 增加今日抓猪次数 {amount} 次，今日剩余：{max(0, zhuazhu_available(target))} 次。")
     return True
 
 
@@ -121,7 +121,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     thief_id = str(event.get("user_id", 0))
     is_admin = ctx["is_admin_event"](event)
     message = event.get("message", [])
-    at_target = extract_at_target(message)
+    at_target = extract_at_target(message, str(ctx.get("bot_qq") or ""))
     if at_target is not None:
         target_id = str(at_target)
     else:
@@ -139,7 +139,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     target = zhubi.user_data(data, target_id)
     if not is_admin and zhuazhu_available(thief) <= 0:
         zhubi.save_data(data)
-        await ctx["reply"](event, "你今天的抓抓次数已经用完。")
+        await ctx["reply"](event, "你今天的抓猪次数已经用完。")
         return
     if not is_admin:
         thief["daily_zhuazhu_used"] = int(thief.get("daily_zhuazhu_used", 0)) + 1
@@ -189,7 +189,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             return
         zhubi.save_data(data)
         remaining = "不限" if is_admin else str(max(0, zhuazhu_available(thief)))
-        await ctx["reply"](event, f"偷鸡不成蚀把米！{common.format_amount(steal_amount)} 从你的{source_name}被反抓到了对方{source_name}。今日剩余抓抓次数：{remaining}。")
+        await ctx["reply"](event, f"偷鸡不成蚀把米！{common.format_amount(steal_amount)} 从你的{source_name}被反抓到了对方{source_name}。今日剩余抓猪次数：{remaining}。")
         return
 
     source_name = transfer_prefer_idle(target, thief, steal_amount)
@@ -199,7 +199,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         return
     zhubi.save_data(data)
     remaining = "不限" if is_admin else str(max(0, zhuazhu_available(thief)))
-    await ctx["reply"](event, f"抓取成功！{common.format_amount(steal_amount)} 猪币已从对方{source_name}转入你的{source_name}。今日剩余抓抓次数：{remaining}。")
+    await ctx["reply"](event, f"抓取成功！{common.format_amount(steal_amount)} 猪币已从对方{source_name}转入你的{source_name}。今日剩余抓猪次数：{remaining}。")
 
 
 COMMAND = {

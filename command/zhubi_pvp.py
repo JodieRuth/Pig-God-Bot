@@ -141,11 +141,11 @@ async def handle_add(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> bo
     return True
 
 
-def extract_at_target(message: list[dict[str, Any]]) -> int | None:
+def extract_at_target(message: list[dict[str, Any]], bot_qq: str = "") -> int | None:
     for seg in message:
         if seg.get("type") == "at":
             qq = str(seg.get("data", {}).get("qq") or "")
-            if qq.isdigit():
+            if qq.isdigit() and qq != bot_qq:
                 return int(qq)
     return None
 
@@ -159,7 +159,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     group_id = int(event.get("group_id", 0))
     challenger_id = str(event.get("user_id", 0))
     message = event.get("message", [])
-    at_target = extract_at_target(message)
+    at_target = extract_at_target(message, str(ctx.get("bot_qq") or ""))
     parts = arg.split()
     if len(parts) >= 2 and any(part.isdigit() for part in parts[:-1]):
         target_id = next(part for part in parts[:-1] if part.isdigit())
