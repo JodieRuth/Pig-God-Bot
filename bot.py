@@ -1442,7 +1442,7 @@ def image_api_url_for_mode(image_url: str, has_reference_images: bool) -> str:
 
 
 def image_request_options() -> dict[str, Any]:
-    options: dict[str, Any] = {"quality": os.getenv("IMAGE_QUALITY", "high").strip() or "high", "stream": True}
+    options: dict[str, Any] = {"quality": os.getenv("IMAGE_QUALITY", "high").strip() or "high"}
     value_map = {
         "IMAGE_SIZE": "size",
         "IMAGE_BACKGROUND": "background",
@@ -1458,12 +1458,6 @@ def image_request_options() -> dict[str, Any]:
             options["output_compression"] = int(compression)
         except ValueError:
             options["output_compression"] = compression
-    partial_images = os.getenv("IMAGE_PARTIAL_IMAGES", "1").strip()
-    if partial_images:
-        try:
-            options["partial_images"] = int(partial_images)
-        except ValueError:
-            options["partial_images"] = partial_images
     return options
 
 
