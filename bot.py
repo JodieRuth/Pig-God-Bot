@@ -1384,20 +1384,23 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                     args = {}
                     result = {"ok": False, "content": f"工具调用失败：参数不是有效 JSON：{sanitize_error_detail(str(exc))}"}
                 else:
-                    executor = tool_lookup.get(tool_name)
-                    if not executor:
-                        result = {"ok": False, "content": f"工具调用失败：未找到工具 {tool_name or 'unknown'}"}
+                    if tool_name in terminal_tool_names and has_context_mutating_tool:
+                        result = {"ok": True, "content": "工具调用已延后：本轮刚更新了图片上下文，请基于最新工具结果重新确认 image_indexes 后再次调用。"}
                     else:
-                        try:
-                            result = await executor(args if isinstance(args, dict) else {}, tool_runtime, command_context())
-                        except Exception as exc:
-                            result = {"ok": False, "content": f"工具调用失败：{exception_detail(exc)}"}
+                        executor = tool_lookup.get(tool_name)
+                        if not executor:
+                            result = {"ok": False, "content": f"工具调用失败：未找到工具 {tool_name or 'unknown'}"}
+                        else:
+                            try:
+                                result = await executor(args if isinstance(args, dict) else {}, tool_runtime, command_context())
+                            except Exception as exc:
+                                result = {"ok": False, "content": f"工具调用失败：{exception_detail(exc)}"}
                 tool_result_text = str(result.get("content") or "")
                 if not tool_result_text:
                     tool_result_text = json.dumps({"ok": bool(result.get("ok")), "error": result.get("error") or "工具没有返回内容"}, ensure_ascii=False)
                 tool_call_id = str(tool_call.get("id") or uuid.uuid4().hex)
                 if tool_name in terminal_tool_names and result.get("ok") and has_context_mutating_tool:
-                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": "工具调用已延后：本轮刚更新了图片上下文，请基于最新工具结果重新确认 image_indexes 后再次调用。"})
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
                     log_json("Tool execution deferred", {"tool": tool_name, "result": result})
                     continue
                 if result.get("answered") and result.get("ok"):
@@ -1923,11 +1926,24 @@ def command_help_text() -> str:
     return "\n".join(lines)
 
 
+def clear_all_contexts() -> int:
+    count = sum(len(items) for items in contexts.values())
+    image_count = sum(len(items) for items in last_images_by_sender.values())
+    contexts.clear()
+    last_images_by_sender.clear()
+    return count + image_count
+
+
 def clear_current_context(event: dict[str, Any]) -> int:
     key = scope_key(event)
     count = len(contexts.get(key, []))
     contexts.pop(key, None)
-    return count
+    image_count = 0
+    for cache_key in list(last_images_by_sender.keys()):
+        if cache_key[0] == key:
+            image_count += len(last_images_by_sender.get(cache_key, []))
+            last_images_by_sender.pop(cache_key, None)
+    return count + image_count
 
 
 async def run_command_capture(*args: str, timeout: int = 10) -> tuple[int, str]:
@@ -2079,7 +2095,7 @@ def command_context() -> dict[str, Any]:
         "photo_enabled": photo_enabled,
         "admin_users": ADMIN_USERS,
         "bot_qq": BOT_QQ,
-        "clear_contexts": contexts.clear,
+        "clear_contexts": clear_all_contexts,
         "clear_current_context": clear_current_context,
         "reboot_process": reboot_process,
         "stop_vndb_json_server": stop_vndb_json_server,
