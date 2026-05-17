@@ -236,6 +236,58 @@ def normalize_sort(value: Any) -> str:
     return SORT_ALIASES.get(key, "safe_relevance")
 
 
+def list_arg(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    for raw in raw_values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        parts = [part.strip() for part in re.split(r"[,，\n]+", text) if part.strip()]
+        for part in parts:
+            if part not in result:
+                result.append(part)
+    return result
+
+
+def split_parenthesized_term(value: str) -> tuple[str, str]:
+    text = str(value or "").strip()
+    match = re.match(r"^(.+?)[（(]([^（）()]+)[）)]$", text)
+    if not match:
+        return text, ""
+    return match.group(1).strip(), match.group(2).strip()
+
+
+def expanded_search_tags(tags: list[str]) -> list[str]:
+    result: list[str] = []
+    for tag in tags:
+        main, qualifier = split_parenthesized_term(tag)
+        for value in (tag, main, qualifier):
+            if value and value not in result:
+                result.append(value)
+    return result
+
+
+def item_match_text(item: dict[str, Any]) -> str:
+    values = [item.get("title"), item.get("description"), item.get("user_name"), item.get("user_id"), " ".join(str(tag) for tag in item.get("tags", []))]
+    return " ".join(str(value or "") for value in values).lower()
+
+
+def matches_required_terms(item: dict[str, Any], terms: list[str]) -> bool:
+    if not terms:
+        return True
+    text = item_match_text(item)
+    compact = re.sub(r"[\s_\-・·:：/\\]+", "", text)
+    for term in terms:
+        lowered = term.lower().strip()
+        term_compact = re.sub(r"[\s_\-・·:：/\\]+", "", lowered)
+        if lowered not in text and term_compact not in compact:
+            return False
+    return True
+
+
 def search_score(item: dict[str, Any], query: str, sort: str) -> tuple[Any, ...]:
     title = str(item.get("title") or "").lower()
     tags = " ".join(str(tag) for tag in item.get("tags", [])).lower()
@@ -282,35 +334,51 @@ def should_enrich_for_sort(sort: str, min_bookmarks: int) -> bool:
     return min_bookmarks > 0 or sort in {"popular_safe", "bookmark_desc"}
 
 
-async def pixiv_search_tag(tag: str, pages: int, sort: str, min_bookmarks: int = 0) -> list[dict[str, Any]]:
+async def fetch_pixiv_search_page(tag: str, page: int) -> list[Any]:
+    params = {
+        "word": tag,
+        "order": "date_d",
+        "mode": "safe",
+        "p": page,
+        "s_mode": "s_tag_full",
+        "type": "illust_and_ugoira",
+        "lang": "zh",
+        "ai_type": 1,
+    }
+    data = await fetch_json(f"{PIXIV_AJAX}/search/illustrations/{quote(tag)}", params)
+    return extract_search_items(data)
+
+
+async def pixiv_search_tag(tag: str, pages: int, sort: str, min_bookmarks: int = 0, alternate_tags: list[str] | None = None, required_terms: list[str] | None = None) -> list[dict[str, Any]]:
     sort = normalize_sort(sort)
     pages = limited_int(pages, 1, 1, MAX_COLLAGES)
     min_bookmarks = limited_int(min_bookmarks, 0, 0, 1_000_000)
+    base_tags = list_arg([tag] + (alternate_tags or []))
+    search_tags = expanded_search_tags(base_tags) or [tag]
+    required = list_arg(required_terms)
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for page in range(1, pages + 1):
-        params = {
-            "word": tag,
-            "order": "date_d",
-            "mode": "safe",
-            "p": page,
-            "s_mode": "s_tag_full",
-            "type": "illust_and_ugoira",
-            "lang": "zh",
-            "ai_type": 1,
-        }
-        data = await fetch_json(f"{PIXIV_AJAX}/search/illustrations/{quote(tag)}", params)
-        items = extract_search_items(data)
-        for raw in items:
-            if not isinstance(raw, dict):
-                continue
-            item = normalize_search_item(raw)
-            if not item or item["pid"] in seen:
-                continue
-            seen.add(item["pid"])
-            collected.append(item)
-    if should_enrich_for_sort(sort, min_bookmarks):
+    for search_tag in search_tags:
+        for page in range(1, pages + 1):
+            items = await fetch_pixiv_search_page(search_tag, page)
+            for raw in items:
+                if not isinstance(raw, dict):
+                    continue
+                item = normalize_search_item(raw)
+                if not item or item["pid"] in seen:
+                    continue
+                item.setdefault("matched_search_tag", search_tag)
+                seen.add(item["pid"])
+                collected.append(item)
+    if required or should_enrich_for_sort(sort, min_bookmarks):
         await enrich_candidate_details(collected)
+    if required:
+        filtered_by_terms = [item for item in collected if matches_required_terms(item, required)]
+        if filtered_by_terms:
+            collected = filtered_by_terms
+        else:
+            for item in collected:
+                item["required_terms_fallback"] = True
     if min_bookmarks > 0:
         filtered = [item for item in collected if int(item.get("bookmark_count") or 0) >= min_bookmarks]
         if filtered:
@@ -318,7 +386,8 @@ async def pixiv_search_tag(tag: str, pages: int, sort: str, min_bookmarks: int =
         else:
             for item in collected:
                 item["min_bookmarks_fallback"] = True
-    collected.sort(key=lambda item: search_score(item, tag, sort), reverse=True)
+    score_query = " ".join(base_tags + required)
+    collected.sort(key=lambda item: search_score(item, score_query, sort), reverse=True)
     return collected[:pages * MAX_CANDIDATES_PER_COLLAGE]
 
 
@@ -481,7 +550,23 @@ def metadata_text(item: dict[str, Any]) -> str:
 
 
 def font(size: int) -> ImageFont.ImageFont:
-    for name in ("arial.ttf", "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/arial.ttf"):
+    candidates = [
+        os.getenv("PIXIV_COLLAGE_FONT", "").strip(),
+        "C:/Windows/Fonts/YuGothR.ttc",
+        "C:/Windows/Fonts/YuGothM.ttc",
+        "C:/Windows/Fonts/YuGothB.ttc",
+        "C:/Windows/Fonts/meiryo.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/msyhbd.ttc",
+        "C:/Windows/Fonts/simsun.ttc",
+        "C:/Windows/Fonts/msgothic.ttc",
+        "C:/Windows/Fonts/NotoSansCJK-Regular.ttc",
+        "arial.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]
+    for name in candidates:
+        if not name:
+            continue
         try:
             return ImageFont.truetype(name, size)
         except Exception:
@@ -549,16 +634,28 @@ def draw_collage(items: list[dict[str, Any]], target: Path, page_number: int) ->
     return target
 
 
-def add_image_to_runtime(path: Path, text: str, runtime: dict[str, Any], ctx: dict[str, Any]) -> int | str:
+def add_images_to_runtime(items: list[tuple[Path, str]], runtime: dict[str, Any], ctx: dict[str, Any]) -> list[int | str]:
     add_image_context = ctx.get("add_tool_image_context")
-    if callable(add_image_context):
-        record = add_image_context(runtime["event"], path, text)
-        images = runtime.setdefault("images", [])
-        if isinstance(images, list) and record not in images:
-            images.append(record)
-            del images[ctx.get("max_context_images", 10):]
-        return images.index(record) + 1 if isinstance(images, list) and record in images else "?"
-    return "?"
+    if not callable(add_image_context):
+        return ["?" for _ in items]
+    records = [add_image_context(runtime["event"], path, text) for path, text in items]
+    images = runtime.setdefault("images", [])
+    if not isinstance(images, list):
+        return ["?" for _ in items]
+    max_images = int(ctx.get("max_context_images", 10) or 10)
+    for record in records:
+        if record in images:
+            images.remove(record)
+    overflow = max(0, len(images) + len(records) - max_images)
+    if overflow:
+        del images[:overflow]
+    images.extend(records)
+    return [images.index(record) + 1 if record in images else "?" for record in records]
+
+
+def add_image_to_runtime(path: Path, text: str, runtime: dict[str, Any], ctx: dict[str, Any]) -> int | str:
+    indexes = add_images_to_runtime([(path, text)], runtime, ctx)
+    return indexes[0] if indexes else "?"
 
 
 def format_candidates(candidates: list[dict[str, Any]], limit: int = 25) -> list[str]:
