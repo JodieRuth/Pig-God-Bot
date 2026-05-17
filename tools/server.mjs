@@ -1367,7 +1367,13 @@ async function downloadImageToCache(url, key) {
   const safeKey = String(key).replace(/[^a-z0-9_-]/gi, '_');
   const existing = ['.jpg', '.png', '.webp', '.gif'].map((ext) => join(IMAGE_CACHE_DIR, `${safeKey}${ext}`)).find((path) => existsSync(path));
   if (existing) return { url, localPath: existing, cached: true };
-  const response = await fetch(url, { headers: { accept: 'image/avif,image/webp,image/png,image/jpeg,image/*' } });
+  const response = await fetch(url, {
+    headers: {
+      accept: 'image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8',
+      'user-agent': 'Mozilla/5.0 local-onebot-bot VNDB image cache',
+      referer: 'https://vndb.org/'
+    }
+  });
   if (!response.ok) throw new Error(`Image download failed ${url}: HTTP ${response.status}`);
   const buffer = Buffer.from(await response.arrayBuffer());
   const ext = extensionFromContentType(response.headers.get('content-type'));

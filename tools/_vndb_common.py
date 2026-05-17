@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -534,6 +537,54 @@ def photo_is_enabled(ctx: dict[str, Any]) -> bool:
     return bool(checker()) if callable(checker) else True
 
 
+def detail_image_url(data: dict[str, Any]) -> str:
+    image = data.get("image")
+    if not isinstance(image, dict):
+        return ""
+    return str(image.get("url") or "").strip()
+
+
+def image_extension_from_url(url: str) -> str:
+    suffix = Path(urlparse(url).path).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+    return ".download"
+
+
+def vndb_fallback_cache_dir(ctx: dict[str, Any]) -> Path:
+    output_dir = ctx.get("output_dir")
+    root = Path(output_dir).parent if output_dir else Path(__file__).resolve().parents[1]
+    return root / "cache" / "vndb_images"
+
+
+async def fallback_download_detail_image(data: dict[str, Any], ctx: dict[str, Any]) -> Path | None:
+    url = detail_image_url(data)
+    if not url:
+        return None
+    cache_dir = vndb_fallback_cache_dir(ctx)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{int(time.time())}_{uuid.uuid4().hex}{image_extension_from_url(url)}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=60)
+        headers = {
+            "accept": "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+            "user-agent": "Mozilla/5.0 local-onebot-bot VNDB image cache",
+            "referer": "https://vndb.org/",
+        }
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(url) as resp:
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status}")
+                target.write_bytes(await resp.read())
+        return target
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        logger = ctx.get("log")
+        if callable(logger):
+            logger(f"VNDB fallback image download failed: {url} error={ctx['exception_detail'](exc) if callable(ctx.get('exception_detail')) else exc}")
+        return None
+
+
 def detail_image_path(data: dict[str, Any]) -> Path | None:
     image = data.get("image")
     if not isinstance(image, dict):
@@ -565,6 +616,10 @@ async def execute_action(action: str, args: dict[str, Any], runtime: dict[str, A
     content = await content_for(f"VNDB {action} 调用成功", payload, data, action)
     if action == "detail" and photo_is_enabled(ctx):
         path = detail_image_path(data)
+        if not path:
+            path = await fallback_download_detail_image(data, ctx)
+            if path:
+                content += f"\n\nVNDB JSON Server 未返回可用本地图片缓存，已由 bot 侧兜底下载图片: {path}"
         if path:
             add_image_context = ctx.get("add_tool_image_context")
             if callable(add_image_context):
