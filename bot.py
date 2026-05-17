@@ -1369,6 +1369,11 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             if "reasoning_content" in message:
                 assistant_message["reasoning_content"] = message.get("reasoning_content") or ""
             messages.append(assistant_message)
+            context_mutating_tool_names = {"vndb_detail"}
+            has_context_mutating_tool = any(
+                str((tool_call.get("function", {}) if isinstance(tool_call, dict) else {}).get("name") or "").strip().lower() in context_mutating_tool_names
+                for tool_call in tool_calls
+            )
             for tool_call in tool_calls:
                 function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
                 tool_name = str(function.get("name") or "").strip().lower()
@@ -1391,6 +1396,10 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                 if not tool_result_text:
                     tool_result_text = json.dumps({"ok": bool(result.get("ok")), "error": result.get("error") or "工具没有返回内容"}, ensure_ascii=False)
                 tool_call_id = str(tool_call.get("id") or uuid.uuid4().hex)
+                if tool_name in terminal_tool_names and result.get("ok") and has_context_mutating_tool:
+                    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": "工具调用已延后：本轮刚更新了图片上下文，请基于最新工具结果重新确认 image_indexes 后再次调用。"})
+                    log_json("Tool execution deferred", {"tool": tool_name, "result": result})
+                    continue
                 if result.get("answered") and result.get("ok"):
                     log_json("Tool execution result", {"tool": tool_name, "result": result})
                     return {"type": "answered_by_tool", "text": ""}
