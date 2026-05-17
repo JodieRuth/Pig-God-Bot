@@ -25,6 +25,8 @@ PIXIV_USE_SYSTEM_PROXY = os.getenv("PIXIV_USE_SYSTEM_PROXY", "1") != "0"
 PIXIV_COOKIE = os.getenv("PIXIV_COOKIE", "").strip()
 PIXIV_ACCEPT_LANGUAGE = os.getenv("PIXIV_ACCEPT_LANGUAGE", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7")
 SEARCH_CACHE_TTL_SECONDS = int(os.getenv("PIXIV_SEARCH_CACHE_TTL_SECONDS", "1800"))
+PIXIV_DETAIL_ENRICH_LIMIT = int(os.getenv("PIXIV_DETAIL_ENRICH_LIMIT", "120"))
+PIXIV_DETAIL_ENRICH_CONCURRENCY = int(os.getenv("PIXIV_DETAIL_ENRICH_CONCURRENCY", "6"))
 SEARCH_CACHE: dict[str, dict[str, Any]] = {}
 
 
@@ -262,6 +264,24 @@ async def fetch_json(url: str, params: dict[str, Any] | None = None) -> Any:
             return json.loads(text)
 
 
+async def enrich_candidate_details(candidates: list[dict[str, Any]], limit: int = PIXIV_DETAIL_ENRICH_LIMIT) -> None:
+    semaphore = asyncio.Semaphore(max(1, PIXIV_DETAIL_ENRICH_CONCURRENCY))
+
+    async def enrich(item: dict[str, Any]) -> None:
+        async with semaphore:
+            try:
+                detail = await pixiv_detail(str(item.get("pid") or ""))
+            except Exception:
+                return
+            item.update({key: value for key, value in detail.items() if value not in (None, "", [])})
+
+    await asyncio.gather(*(enrich(item) for item in candidates[:max(0, limit)]))
+
+
+def should_enrich_for_sort(sort: str, min_bookmarks: int) -> bool:
+    return min_bookmarks > 0 or sort in {"popular_safe", "bookmark_desc"}
+
+
 async def pixiv_search_tag(tag: str, pages: int, sort: str, min_bookmarks: int = 0) -> list[dict[str, Any]]:
     sort = normalize_sort(sort)
     pages = limited_int(pages, 1, 1, MAX_COLLAGES)
@@ -287,10 +307,17 @@ async def pixiv_search_tag(tag: str, pages: int, sort: str, min_bookmarks: int =
             item = normalize_search_item(raw)
             if not item or item["pid"] in seen:
                 continue
-            if int(item.get("bookmark_count") or 0) < min_bookmarks:
-                continue
             seen.add(item["pid"])
             collected.append(item)
+    if should_enrich_for_sort(sort, min_bookmarks):
+        await enrich_candidate_details(collected)
+    if min_bookmarks > 0:
+        filtered = [item for item in collected if int(item.get("bookmark_count") or 0) >= min_bookmarks]
+        if filtered:
+            collected = filtered
+        else:
+            for item in collected:
+                item["min_bookmarks_fallback"] = True
     collected.sort(key=lambda item: search_score(item, tag, sort), reverse=True)
     return collected[:pages * MAX_CANDIDATES_PER_COLLAGE]
 

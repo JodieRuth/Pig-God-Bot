@@ -84,6 +84,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
         image_indexes.append(image_index)
     lines = [
         "Pixiv 搜索成功，已生成候选缩略图拼图并加入当前 LLM 图片上下文。",
+        "警告：搜索结果已自动过滤 R18、R18G 和 AI 生成内容，但仍需人工确认内容是否符合用户需求与安全规范。",
         f"search_id: {search_id}",
         f"tag: {tag}",
         f"排序/筛选模式: {sort}",
@@ -94,5 +95,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
         "重要：拼图里的 01、02 等编号是 Pixiv 候选编号，不是 bot 图片编号。需要某个缩略图背后的原图/大图时，继续调用 pixiv_select_result(search_id, candidate_numbers)。",
         "候选摘要：",
     ]
+    if any(bool(item.get("min_bookmarks_fallback")) for item in candidates):
+        lines.insert(6, "提示：没有候选达到请求的最低收藏数，因此已自动退回为热门/相关排序结果，避免误报无结果。")
     lines.extend(format_candidates(candidates, 30))
     return {"ok": True, "content": "\n".join(lines), "search_id": search_id, "candidate_count": len(candidates), "collage_image_indexes": image_indexes}
