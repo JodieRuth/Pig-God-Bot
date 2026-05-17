@@ -42,7 +42,7 @@ def idle_summary(state: dict[str, Any], balance: float) -> str:
     lines = [
         f"钱包猪币：{common.format_amount(balance)}",
         f"idle 猪币：{common.format_amount(total)}",
-        f"MAX 储量：{int(float(state.get('max', 0.0)))}MAX",
+        f"MAX 储量：{int(float(state.get('max', 0.0))):,}MAX",
         f"当前效率倍率：{common.idle_multiplier(state):.4f}x",
         f"每单位基础获取率：{common.idle_unit_rate(state):.6f}/秒",
         f"idle 每秒产出速度：{common.format_amount(growth_per_sec)}",

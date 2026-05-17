@@ -59,7 +59,7 @@ def truncate_decimal(value: float) -> float:
 
 
 def parse_amount_value(value: str) -> float | None:
-    text = value.strip().upper()
+    text = value.strip().upper().replace(",", "")
     if not text:
         return None
     if "MAX" in text:
@@ -188,16 +188,24 @@ def normalize_idle_units(state: dict[str, Any]) -> None:
     state["max"] = max_count
 
 
+def format_number(value: int | float) -> str:
+    text = f"{truncate_decimal(value):.{DECIMAL_PRECISION}f}".rstrip("0").rstrip(".")
+    if not text:
+        text = "0"
+    if "." in text:
+        whole, decimal = text.split(".", 1)
+        return f"{int(whole):,}.{decimal}"
+    return f"{int(text):,}"
+
+
 def format_amount(value: int | float) -> str:
     amount = max(0.0, float(value))
     max_count = int(amount // MAX_UNIT)
     remainder = truncate_decimal(amount - max_count * MAX_UNIT)
-    remainder_text = f"{remainder:.{DECIMAL_PRECISION}f}".rstrip("0").rstrip(".")
-    if not remainder_text:
-        remainder_text = "0"
+    remainder_text = format_number(remainder)
     if max_count <= 0:
         return remainder_text
-    return f"{max_count}MAX+{remainder_text}"
+    return f"{max_count:,}MAX+{remainder_text}"
 
 
 def remake_multiplier(state: dict[str, Any]) -> float:
@@ -224,7 +232,7 @@ def upgrade_cost(kind: str, level: int) -> int:
 
 def level_label(level: int) -> str:
     cycle, index = divmod(max(0, level), len(LEVEL_NAMES))
-    prefix = f"{cycle}MAX-" if cycle > 0 else ""
+    prefix = f"{cycle:,}MAX-" if cycle > 0 else ""
     return prefix + LEVEL_NAMES[index]
 
 

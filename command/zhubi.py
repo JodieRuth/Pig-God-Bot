@@ -30,20 +30,28 @@ def balance_of_value(value: float) -> float:
     return truncate_decimal(float(value))
 
 
+def format_number(value: int | float) -> str:
+    text = f"{truncate_decimal(value):.{DECIMAL_PRECISION}f}".rstrip("0").rstrip(".")
+    if not text:
+        text = "0"
+    if "." in text:
+        whole, decimal = text.split(".", 1)
+        return f"{int(whole):,}.{decimal}"
+    return f"{int(text):,}"
+
+
 def format_balance(value: int | float) -> str:
     amount = max(0.0, float(value))
     max_count = int(amount // MAX_UNIT)
     remainder = truncate_decimal(amount - max_count * MAX_UNIT)
-    remainder_text = f"{remainder:.{DECIMAL_PRECISION}f}".rstrip("0").rstrip(".")
-    if not remainder_text:
-        remainder_text = "0"
+    remainder_text = format_number(remainder)
     if max_count <= 0:
         return remainder_text
-    return f"{max_count}MAX+{remainder_text}"
+    return f"{max_count:,}MAX+{remainder_text}"
 
 
 def parse_amount_value(value: str) -> float | None:
-    text = value.strip().upper()
+    text = value.strip().upper().replace(",", "")
     if not text:
         return None
     if "MAX" in text:

@@ -897,7 +897,7 @@ async def download_image(session: aiohttp.ClientSession, url: str) -> Path | Non
         log("Image skipped: unsupported URL/file format")
         return None
 
-    name = f"{int(time.time())}_{uuid.uuid4().hex}.jpg"
+    name = f"{int(time.time())}_{uuid.uuid4().hex}.download"
     target = CACHE_DIR / name
     size = 0
     async with session.get(url, timeout=60) as resp:
@@ -909,8 +909,9 @@ async def download_image(session: aiohttp.ClientSession, url: str) -> Path | Non
                     target.unlink(missing_ok=True)
                     raise RuntimeError("图片超过大小限制")
                 f.write(chunk)
-    log(f"Image downloaded: {target} ({size} bytes)")
-    return target
+    normalized = normalize_cached_image(target)
+    log(f"Image downloaded: {normalized} ({size} bytes)")
+    return normalized
 
 
 def image_record(path: Path, sender_id: int, sender_name: str, message_id: Any = None) -> dict[str, Any]:
@@ -1095,10 +1096,43 @@ def read_image_b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
+def image_format(path: Path) -> str:
+    try:
+        with Image.open(path) as img:
+            return str(img.format or "").upper()
+    except Exception:
+        suffix = path.suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            return "JPEG"
+        if suffix == ".png":
+            return "PNG"
+        if suffix == ".webp":
+            return "WEBP"
+        if suffix == ".gif":
+            return "GIF"
+        return ""
+
+
+def image_suffix_for_format(format_name: str) -> str:
+    return {
+        "JPEG": ".jpg",
+        "JPG": ".jpg",
+        "PNG": ".png",
+        "WEBP": ".webp",
+    }.get(format_name.upper(), ".png")
+
+
+def image_content_type(path: Path) -> str:
+    return {
+        "JPEG": "image/jpeg",
+        "JPG": "image/jpeg",
+        "PNG": "image/png",
+        "WEBP": "image/webp",
+    }.get(image_format(path), "image/png")
+
+
 def image_data_url(path: Path) -> str:
-    suffix = path.suffix.lower()
-    mime = "image/png" if suffix == ".png" else "image/jpeg"
-    return f"data:{mime};base64,{read_image_b64(path)}"
+    return f"data:{image_content_type(path)};base64,{read_image_b64(path)}"
 
 
 def is_gif_file(path: Path) -> bool:
@@ -1107,7 +1141,7 @@ def is_gif_file(path: Path) -> bool:
 
 
 def to_static_image(path: Path) -> Path:
-    if path.suffix.lower() != ".gif" and not is_gif_file(path):
+    if image_format(path) != "GIF":
         return path
     target = path.with_suffix(".png")
     if target.exists():
@@ -1115,7 +1149,22 @@ def to_static_image(path: Path) -> Path:
     with Image.open(path) as img:
         frame = next(ImageSequence.Iterator(img)).convert("RGBA")
         frame.save(target)
+    path.unlink(missing_ok=True)
     log(f"GIF converted to first frame: {target}")
+    return target
+
+
+def normalize_cached_image(path: Path) -> Path:
+    static_path = to_static_image(path)
+    format_name = image_format(static_path)
+    suffix = image_suffix_for_format(format_name)
+    target = static_path.with_suffix(suffix)
+    if static_path == target:
+        return static_path
+    if target.exists():
+        target.unlink()
+    static_path.replace(target)
+    log(f"Image suffix normalized: {static_path} -> {target}")
     return target
 
 
@@ -1434,15 +1483,6 @@ def images_edit_form(prompt: str, image_paths: list[Path], image_model: str) -> 
     for path in image_paths:
         form.add_field("image", path.read_bytes(), filename=path.name, content_type=image_content_type(path))
     return form
-
-
-def image_content_type(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
-        return "image/jpeg"
-    if suffix == ".webp":
-        return "image/webp"
-    return "image/png"
 
 
 def images_generation_payload(prompt: str, image_model: str) -> dict[str, Any]:
