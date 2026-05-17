@@ -1221,6 +1221,8 @@ def build_image_input_note(images: list[dict[str, Any]]) -> str:
         lines.append(f"图{index} = 第 {index} 张输入图片，文件名 {path.name}，发送者 {image_sender_label(record)}")
     lines.append("当用户提到图1、图2、第一张、第二张时，必须按这个编号理解；不要自行交换图片顺序。")
     lines.append("如果需要直接回复某一条上下文消息，可以调用 reply_to_context_message，并使用最近上下文里标注的消息ID。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
+    lines.append("如果用户只是要求把你能看到的某张输入图片直接发出来、转发出来、贴出来，或是需要你通过各种手段得到的图片，而不是生成或编辑图片，必须调用 send_visible_image，并传入是否回复、回复消息ID、文字和图片编号；该工具调用成功后代表已经完成回复，不要再输出普通文本。")
+    lines.append("Pixiv 搜索工具返回的候选拼图编号不是这里的图1/图2编号；如果需要拼图中某个缩略图背后的真实大图，必须调用 pixiv_select_result，传入 search_id 和拼图候选编号，让程序下载完整图片并把元数据与图片追加进上下文。")
     lines.append("强制工具规则：只要用户问题涉及任何图片中的人物是谁、角色名、出处、作品来源、像谁、叫什么、人物身份判断，必须优先调用 animetrace_character 工具并传入对应图片编号；不得仅根据上下文、文件名、画风、模型视觉能力或聊天历史猜测后直接回答。")
     return "\n".join(lines)
 
@@ -1240,6 +1242,15 @@ def build_openai_messages(prompt: str, context_texts: list[str], context_notes: 
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": content},
     ]
+
+
+def build_updated_tool_image_content(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    image_note = build_image_input_note(images)
+    text = "工具刚刚更新了当前 LLM 图片上下文。请查看下面重新提供的图片，并注意其中可能包含 Pixiv 候选拼图或刚下载的 Pixiv 原图。\n\n" + image_note
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for record in images[:MAX_CONTEXT_IMAGES]:
+        content.append({"type": "image_url", "image_url": {"url": image_data_url(image_path(record))}})
+    return content
 
 
 def build_context_message_note(records: list[dict[str, Any]]) -> str:
@@ -1262,6 +1273,8 @@ def prompt_image_source_note(images: list[dict[str, Any]]) -> str:
         lines.append(f"图{index}：{image_sender_label(record)}")
     lines.append("默认规则：如果触发者本人没有明确要求引用别人发的图，优先只使用触发者本人发送的图片；只有在明确回复他人消息、点名使用他人图片、或用户强烈要求跨发送者编辑时，才可以使用其他人的图片。")
     lines.append("如果用户要求你直接回复某个人或某条消息，优先调用 reply_to_context_message，并使用上下文中标注的消息ID。工具成功后不得再输出普通文本。")
+    lines.append("如果用户要求直接发送、转发、贴出某张可见输入图片，调用 send_visible_image 发送对应图片编号；需要贴到某条消息下方时设置 reply 和 message_id。工具成功后不得再输出普通文本。")
+    lines.append("如果可见图片是 Pixiv 候选拼图，拼图里的编号不是 bot 图片编号；必须先调用 pixiv_select_result 下载对应候选真实大图并追加元数据上下文，再使用返回的新 bot 图片编号。")
     lines.append("人物识别强制规则：涉及图中角色/人物身份、出处、名字、像谁等问题时，必须先调用 animetrace_character，不能先自行推断。")
     return "\n".join(lines)
 
@@ -1335,7 +1348,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         "system_prompt": system_prompt,
     }
     tool_lookup = TOOL_EXECUTORS
-    terminal_tool_names = {"generate_image", "reply_to_context_message"}
+    terminal_tool_names = {"generate_image", "reply_to_context_message", "send_visible_image"}
 
     for _ in range(15):
         tool_names = []
@@ -1369,11 +1382,12 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             if "reasoning_content" in message:
                 assistant_message["reasoning_content"] = message.get("reasoning_content") or ""
             messages.append(assistant_message)
-            context_mutating_tool_names = {"vndb_detail"}
+            context_mutating_tool_names = {"vndb_detail", "pixiv_search_tag", "pixiv_detail", "pixiv_select_result"}
             has_context_mutating_tool = any(
                 str((tool_call.get("function", {}) if isinstance(tool_call, dict) else {}).get("name") or "").strip().lower() in context_mutating_tool_names
                 for tool_call in tool_calls
             )
+            context_mutated_success = False
             for tool_call in tool_calls:
                 function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
                 tool_name = str(function.get("name") or "").strip().lower()
@@ -1409,8 +1423,12 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                 if tool_name in terminal_tool_names and result.get("ok"):
                     log_json("Tool execution result", {"tool": tool_name, "result": result})
                     return {"type": "answered_by_tool", "text": ""}
+                if tool_name in context_mutating_tool_names and result.get("ok"):
+                    context_mutated_success = True
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
                 log_json("Tool execution result", {"tool": tool_name, "result": result})
+            if context_mutated_success and tool_runtime.get("images"):
+                messages.append({"role": "user", "content": build_updated_tool_image_content(tool_runtime.get("images", []))})
             continue
         reply_text = message.get("content") or ""
         log(f"LLM reply parsed: {reply_text[:500]}")
