@@ -85,7 +85,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
         return {"ok": False, "content": f"Pixiv 搜索失败：{ctx['exception_detail'](exc)}"}
     if not candidates:
         return {"ok": True, "content": f"Pixiv 搜索完成，但没有找到通过安全过滤的候选。tag: {tag}"}
-    search_id = store_search(candidates, tag)
+    search_id = store_search(candidates, tag, runtime=runtime)
     output_dir = Path(ctx.get("output_dir") or ".")
     try:
         collages = await create_collages(candidates, output_dir, search_id)
