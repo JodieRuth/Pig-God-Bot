@@ -74,7 +74,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
         try:
             path = await download_full_image(item, output_dir)
         except Exception as exc:
-            lines.append(f"候选 {number:02d}: 下载失败：{ctx['exception_detail'](exc)}")
+            lines.append(f"候选 {number:02d}: 下载失败，已尝试原图/降级 URL/镜像/重试/IPv4 兜底：{ctx['exception_detail'](exc)}")
             continue
         content = metadata_text(item)
         image_index = add_image_to_runtime(path, content, runtime, ctx)

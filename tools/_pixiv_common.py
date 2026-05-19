@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
+import socket
 import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -21,6 +23,10 @@ MAX_CANDIDATES_PER_COLLAGE = 25
 MAX_COLLAGES = 4
 MAX_SEARCH_CANDIDATES = MAX_CANDIDATES_PER_COLLAGE * MAX_COLLAGES
 PIXIV_TIMEOUT = aiohttp.ClientTimeout(total=int(os.getenv("PIXIV_TIMEOUT_SECONDS", "45")))
+PIXIV_RETRY_ATTEMPTS = max(1, int(os.getenv("PIXIV_RETRY_ATTEMPTS", "4")))
+PIXIV_RETRY_BASE_DELAY = max(0.1, float(os.getenv("PIXIV_RETRY_BASE_DELAY_SECONDS", "0.8")))
+PIXIV_FORCE_IPV4 = os.getenv("PIXIV_FORCE_IPV4", "1") != "0"
+PIXIV_IMAGE_MIRRORS = [item.strip().rstrip("/") for item in os.getenv("PIXIV_IMAGE_MIRRORS", "https://pixiv.cat,https://i.pixiv.re").split(",") if item.strip()]
 PIXIV_COOKIE = os.getenv("PIXIV_COOKIE", "").strip()
 PIXIV_ACCEPT_LANGUAGE = os.getenv("PIXIV_ACCEPT_LANGUAGE", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7")
 SEARCH_CACHE_TTL_SECONDS = int(os.getenv("PIXIV_SEARCH_CACHE_TTL_SECONDS", "1800"))
@@ -397,22 +403,66 @@ def search_score(item: dict[str, Any], query: str, sort: str) -> tuple[Any, ...]
 def pixiv_network_hint(exc: BaseException) -> str:
     detail = str(exc)
     if isinstance(exc, aiohttp.ClientConnectorError):
-        return f"Pixiv 网络连接失败：{detail}。已强制使用系统代理配置；如果仍失败，请确认系统代理或 HTTP_PROXY/HTTPS_PROXY 环境变量存在且能访问 Pixiv，然后重启 bot。"
+        return f"Pixiv 网络连接失败：{detail}。已强制使用系统代理配置并启用重试/IPv4 兜底；如果仍失败，请确认系统代理或 HTTP_PROXY/HTTPS_PROXY 环境变量存在且能访问 Pixiv，然后重启 bot。"
     if isinstance(exc, asyncio.TimeoutError):
         return f"Pixiv 网络请求超时：{detail}。请检查系统代理是否可访问 Pixiv，或调大 PIXIV_TIMEOUT_SECONDS。"
     return detail
 
 
+class PixivHttpError(RuntimeError):
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(f"Pixiv HTTP {status}: {detail}")
+        self.status = status
+
+
+def pixiv_connector(force_ipv4: bool) -> aiohttp.TCPConnector:
+    family = socket.AF_INET if force_ipv4 else socket.AF_UNSPEC
+    return aiohttp.TCPConnector(family=family, ttl_dns_cache=300, enable_cleanup_closed=True)
+
+
+def retryable_status(status: int) -> bool:
+    return status in {408, 425, 429, 500, 502, 503, 504}
+
+
+def retryable_exception(exc: BaseException) -> bool:
+    return isinstance(exc, (aiohttp.ClientConnectorError, aiohttp.ClientOSError, aiohttp.ServerDisconnectedError, aiohttp.ServerTimeoutError, asyncio.TimeoutError))
+
+
+async def retry_delay(attempt: int) -> None:
+    await asyncio.sleep(PIXIV_RETRY_BASE_DELAY * (2 ** max(0, attempt - 1)) + random.uniform(0, 0.25))
+
+
+async def fetch_json_once(url: str, params: dict[str, Any] | None, force_ipv4: bool) -> Any:
+    async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=REQUEST_HEADERS, trust_env=True, connector=pixiv_connector(force_ipv4)) as session:
+        async with session.get(url, params=params) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                raise PixivHttpError(resp.status, text[:300])
+            return json.loads(text)
+
+
 async def fetch_json(url: str, params: dict[str, Any] | None = None) -> Any:
-    try:
-        async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=REQUEST_HEADERS, trust_env=True) as session:
-            async with session.get(url, params=params) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    raise RuntimeError(f"Pixiv HTTP {resp.status}: {text[:300]}")
-                return json.loads(text)
-    except Exception as exc:
-        raise RuntimeError(pixiv_network_hint(exc)) from exc
+    errors: list[str] = []
+    modes = [PIXIV_FORCE_IPV4]
+    if PIXIV_FORCE_IPV4:
+        modes.append(False)
+    for force_ipv4 in modes:
+        for attempt in range(1, PIXIV_RETRY_ATTEMPTS + 1):
+            try:
+                return await fetch_json_once(url, params, force_ipv4)
+            except PixivHttpError as exc:
+                errors.append(f"{'IPv4' if force_ipv4 else 'default'} attempt {attempt}: {exc}")
+                if not retryable_status(exc.status) or attempt >= PIXIV_RETRY_ATTEMPTS:
+                    if not retryable_status(exc.status):
+                        raise
+                    break
+                await retry_delay(attempt)
+            except Exception as exc:
+                errors.append(f"{'IPv4' if force_ipv4 else 'default'} attempt {attempt}: {pixiv_network_hint(exc)}")
+                if not retryable_exception(exc) or attempt >= PIXIV_RETRY_ATTEMPTS:
+                    break
+                await retry_delay(attempt)
+    raise RuntimeError("Pixiv 请求失败，已尝试重试与连接模式兜底：" + " | ".join(errors[-6:]))
 
 
 async def enrich_candidate_details(candidates: list[dict[str, Any]], limit: int = PIXIV_DETAIL_ENRICH_LIMIT) -> None:
@@ -525,14 +575,16 @@ def normalize_detail_item(body: dict[str, Any]) -> dict[str, Any] | None:
     user_id = str(body.get("userId") or "").strip()
     if is_banned_author(user_id):
         return None
+    full_url = pick_url(urls.get("original"), urls.get("regular"), urls.get("small"), body.get("url"))
+    thumbnail_url = pick_url(urls.get("thumb_mini"), urls.get("small"), urls.get("regular"), body.get("url")) or full_url
     item = {
         "pid": pid,
         "title": clean_text(body.get("illustTitle") or body.get("title")),
         "description": clean_text(body.get("description") or body.get("caption"), 1200),
         "user_id": user_id,
         "user_name": clean_text(body.get("userName") or body.get("userAccount"), 80),
-        "thumbnail_url": pick_url(urls.get("thumb_mini"), urls.get("small"), urls.get("regular"), body.get("url")),
-        "full_url": pick_url(urls.get("original"), urls.get("regular"), urls.get("small")),
+        "thumbnail_url": thumbnail_url,
+        "full_url": full_url,
         "url": f"https://www.pixiv.net/artworks/{pid}",
         "tags": tags,
         "bookmark_count": numeric_score(body.get("bookmarkCount")),
@@ -591,23 +643,90 @@ def candidate_by_number(search_id: str, number: Any) -> dict[str, Any] | None:
     return None
 
 
-async def download_url(url: str, target_dir: Path, prefix: str) -> Path:
+def pixiv_image_url_variants(url: str) -> list[str]:
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return []
+    variants: list[str] = [url]
+    path = parsed.path
+    if "_original." in path:
+        for suffix in ("_master1200.jpg", "_master1200.png", "_master1200.webp"):
+            variants.append(urlunparse(parsed._replace(path=re.sub(r"_original\.[^.\/]+$", suffix, path))))
+    if "_master1200." in path:
+        for suffix in ("_original.jpg", "_original.png", "_original.webp"):
+            variants.append(urlunparse(parsed._replace(path=re.sub(r"_master1200\.[^.\/]+$", suffix, path))))
+    if "/img-original/" in path:
+        for ext in (".jpg", ".png", ".webp"):
+            variants.append(urlunparse(parsed._replace(path=re.sub(r"\.[^.\/]+$", ext, path))))
+        master_path = path.replace("/img-original/", "/img-master/")
+        master_path = re.sub(r"_ugoira0?\.[^.\/]+$", "_master1200.jpg", master_path)
+        master_path = re.sub(r"\.[^.\/]+$", "_master1200.jpg", master_path)
+        variants.append(urlunparse(parsed._replace(path=master_path)))
+    if "/img-master/" in path:
+        variants.append(urlunparse(parsed._replace(path=re.sub(r"_master1200\.[^.\/]+$", "_square1200.jpg", path))))
+    result: list[str] = []
+    for item in variants:
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def pixiv_image_mirror_urls(pid: Any) -> list[str]:
+    value = str(pid or "").strip()
+    if not value:
+        return []
+    return [f"{base}/{value}.jpg" for base in PIXIV_IMAGE_MIRRORS]
+
+
+def pixiv_image_download_urls(url: str, pid: Any = None) -> list[str]:
+    result: list[str] = []
+    for item in pixiv_image_url_variants(url) + pixiv_image_mirror_urls(pid):
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+async def download_url_once(url: str, target: Path, force_ipv4: bool) -> None:
+    async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=IMAGE_HEADERS, trust_env=True, connector=pixiv_connector(force_ipv4)) as session:
+        async with session.get(url) as resp:
+            if resp.status >= 400:
+                text = await resp.text()
+                raise PixivHttpError(resp.status, f"图片下载失败 HTTP {resp.status}: {text[:200]}")
+            target.write_bytes(await resp.read())
+
+
+async def download_url(url: str, target_dir: Path, prefix: str, pid: Any = None) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
-    suffix = Path(url.split("?", 1)[0]).suffix.lower()
-    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
-        suffix = ".jpg"
-    target = target_dir / f"{prefix}_{uuid.uuid4().hex}{suffix}"
-    try:
-        async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=IMAGE_HEADERS, trust_env=True) as session:
-            async with session.get(url) as resp:
-                if resp.status >= 400:
-                    text = await resp.text()
-                    raise RuntimeError(f"图片下载失败 HTTP {resp.status}: {text[:200]}")
-                target.write_bytes(await resp.read())
-    except Exception as exc:
-        target.unlink(missing_ok=True)
-        raise RuntimeError(pixiv_network_hint(exc)) from exc
-    return normalize_image_file(target)
+    errors: list[str] = []
+    urls = pixiv_image_download_urls(url, pid)
+    if not urls:
+        raise RuntimeError("图片下载失败：没有可用 URL")
+    modes = [PIXIV_FORCE_IPV4]
+    if PIXIV_FORCE_IPV4:
+        modes.append(False)
+    for candidate_url in urls:
+        suffix = Path(urlparse(candidate_url).path).suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            suffix = ".jpg"
+        target = target_dir / f"{prefix}_{uuid.uuid4().hex}{suffix}"
+        for force_ipv4 in modes:
+            for attempt in range(1, PIXIV_RETRY_ATTEMPTS + 1):
+                try:
+                    await download_url_once(candidate_url, target, force_ipv4)
+                    return normalize_image_file(target)
+                except PixivHttpError as exc:
+                    target.unlink(missing_ok=True)
+                    errors.append(f"{candidate_url} {'IPv4' if force_ipv4 else 'default'} attempt {attempt}: {exc}")
+                    if not retryable_status(exc.status) or attempt >= PIXIV_RETRY_ATTEMPTS:
+                        break
+                    await retry_delay(attempt)
+                except Exception as exc:
+                    target.unlink(missing_ok=True)
+                    errors.append(f"{candidate_url} {'IPv4' if force_ipv4 else 'default'} attempt {attempt}: {pixiv_network_hint(exc)}")
+                    if not retryable_exception(exc) or attempt >= PIXIV_RETRY_ATTEMPTS:
+                        break
+                    await retry_delay(attempt)
+    raise RuntimeError("图片下载失败，已尝试原图/降级 URL/镜像/重试/IPv4 兜底：" + " | ".join(errors[-10:]))
 
 
 def normalize_image_file(path: Path) -> Path:
@@ -633,18 +752,31 @@ async def download_thumbnail(item: dict[str, Any], target_dir: Path) -> Path | N
     if not url:
         return None
     try:
-        return await download_url(url, target_dir, f"pixiv_thumb_{item.get('pid')}")
+        return await download_url(url, target_dir, f"pixiv_thumb_{item.get('pid')}", item.get("pid"))
     except Exception:
         return None
 
 
 async def download_full_image(item: dict[str, Any], target_dir: Path) -> Path:
-    detail = await pixiv_detail(str(item.get("pid") or ""))
-    item.update({key: value for key, value in detail.items() if value not in (None, "", [])})
-    url = str(item.get("full_url") or "")
-    if not url:
-        raise RuntimeError("候选没有可下载图片 URL")
-    return await download_url(url, target_dir, f"pixiv_{item.get('pid')}")
+    detail_error = ""
+    try:
+        detail = await pixiv_detail(str(item.get("pid") or ""))
+    except Exception as exc:
+        detail_error = pixiv_network_hint(exc)
+    else:
+        item.update({key: value for key, value in detail.items() if value not in (None, "", [])})
+    urls = [str(item.get(key) or "") for key in ("full_url", "thumbnail_url")]
+    last_error = ""
+    for url in urls:
+        if not url:
+            continue
+        try:
+            return await download_url(url, target_dir, f"pixiv_{item.get('pid')}", item.get("pid"))
+        except Exception as exc:
+            last_error = pixiv_network_hint(exc)
+    if detail_error:
+        raise RuntimeError(f"详情接口失败后已回退搜索结果 URL，但仍未下载成功。详情错误：{detail_error}；下载错误：{last_error or '无可用 URL'}")
+    raise RuntimeError(f"候选没有可下载图片 URL 或下载失败：{last_error or '无可用 URL'}")
 
 
 def metadata_text(item: dict[str, Any]) -> str:
