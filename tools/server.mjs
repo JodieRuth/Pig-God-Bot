@@ -1336,16 +1336,18 @@ function pickBestLocalTarget(input) {
   return { type: found.vndbid?.startsWith('c') ? 'character' : 'vn', id: found.id, local: found };
 }
 
+const imageUrlPath = (prefix, numeric) => `https://t.vndb.org/${prefix}/${String(numeric).slice(-2).padStart(2, '0')}/${numeric}.jpg`;
+
 function vndbImageUrlFromId(imageId) {
   if (!imageId) return null;
   if (/^https?:\/\//i.test(imageId)) return imageId;
   const value = String(imageId).trim();
   const normalized = value.toLocaleLowerCase();
-  if (/^\d+$/.test(normalized)) return `https://t.vndb.org/cv/${normalized}.jpg`;
+  if (/^\d+$/.test(normalized)) return imageUrlPath('cv', normalized);
   const prefixed = normalized.match(/^(cv|ch)\/?(\d+)$/i);
-  if (prefixed) return `https://t.vndb.org/${prefixed[1].toLocaleLowerCase()}/${prefixed[2]}.jpg`;
+  if (prefixed) return imageUrlPath(prefixed[1].toLocaleLowerCase(), prefixed[2]);
   const sharded = normalized.match(/^(cv|ch)\/(\d{2})\/(\d+)\.\w+$/i);
-  if (sharded) return `https://t.vndb.org/${sharded[1].toLocaleLowerCase()}/${sharded[2]}/${sharded[3]}.jpg`;
+  if (sharded) return imageUrlPath(sharded[1].toLocaleLowerCase(), sharded[3]);
   return null;
 }
 
@@ -1429,9 +1431,11 @@ async function vndbApiDetail(input) {
   const target = pickBestLocalTarget(input);
   const downloadImage = Boolean(input.downloadImage ?? input.image ?? true);
   const localImageUrl = vndbImageUrlFromId(target.local.image);
-  const fields = target.type === 'vn'
-    ? input.fields ?? 'id,title,alttitle,aliases,olang,released,languages,platforms,image.url,image.sexual,image.violence,image.votecount,image.dims,length,length_minutes,description,rating,votecount,tags.rating,tags.spoiler,tags.lie,tags.id,tags.name,developers.id,developers.name,relations.id,relations.relation,relations.title'
-    : input.fields ?? 'id,name,original,aliases,description,image.url,image.sexual,image.violence,image.votecount,image.dims,sex,blood_type,height,weight,bust,waist,hips,birthday,age,traits.id,traits.name,traits.spoiler,traits.lie,vns.id,vns.title,vns.role,vns.spoiler';
+  const defaultFields = target.type === 'vn'
+    ? 'id,title,alttitle,aliases,olang,released,languages,platforms,image.url,image.sexual,image.violence,image.votecount,image.dims,length,length_minutes,description,rating,votecount,tags.rating,tags.spoiler,tags.lie,tags.id,tags.name,developers.id,developers.name,relations.id,relations.relation,relations.title'
+    : 'id,name,original,aliases,description,image.url,image.sexual,image.violence,image.votecount,image.dims,sex,blood_type,height,weight,bust,waist,hips,birthday,age,traits.id,traits.name,traits.spoiler,traits.lie,vns.id,vns.title,vns.role,vns.spoiler';
+  const requestedFields = typeof input.fields === 'string' ? input.fields.trim() : input.fields;
+  const fields = requestedFields || defaultFields;
   const endpoint = target.type === 'vn' ? 'vn' : 'character';
   const api = await postJson(`${VNDB_API_BASE}/${endpoint}`, {
     filters: ['id', '=', target.type === 'vn' ? `v${target.id}` : `c${target.id}`],

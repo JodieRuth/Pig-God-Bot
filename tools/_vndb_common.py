@@ -537,6 +537,11 @@ def photo_is_enabled(ctx: dict[str, Any]) -> bool:
     return bool(checker()) if callable(checker) else True
 
 
+def vndb_image_url_path(prefix: str, numeric: str) -> str:
+    shard = numeric[-2:].zfill(2)
+    return f"https://t.vndb.org/{prefix}/{shard}/{numeric}.jpg"
+
+
 def vndb_image_url_from_id(value: Any) -> str:
     if value is None:
         return ""
@@ -547,13 +552,13 @@ def vndb_image_url_from_id(value: Any) -> str:
         return text
     lowered = text.lower()
     if lowered.startswith("ch"):
-        numeric = lowered.removeprefix("ch")
-        return f"https://t.vndb.org/ch/{numeric}.jpg" if numeric.isdigit() else ""
+        numeric = lowered.removeprefix("ch").removeprefix("/")
+        return vndb_image_url_path("ch", numeric) if numeric.isdigit() else ""
     if lowered.startswith("cv"):
-        numeric = lowered.removeprefix("cv")
-        return f"https://t.vndb.org/cv/{numeric}.jpg" if numeric.isdigit() else ""
+        numeric = lowered.removeprefix("cv").removeprefix("/")
+        return vndb_image_url_path("cv", numeric) if numeric.isdigit() else ""
     if lowered.isdigit():
-        return f"https://t.vndb.org/cv/{lowered}.jpg"
+        return vndb_image_url_path("cv", lowered)
     return ""
 
 
