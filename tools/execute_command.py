@@ -4,12 +4,14 @@ import asyncio
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
 MAX_OUTPUT_CHARS = 20000
 DEFAULT_TIMEOUT_SECONDS = 30
 MAX_TIMEOUT_SECONDS = 120
+SYSTEM_PROXY_ENV_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
 SCRIPT_SUFFIXES = {".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".js", ".jse", ".wsf", ".py", ".sh"}
 DANGEROUS_PATTERNS = [
     r"\bformat\b",
@@ -88,7 +90,60 @@ def timeout_value(value: Any) -> int:
     return max(1, min(number, MAX_TIMEOUT_SECONDS))
 
 
-TOOL_DESCRIPTION = "在受限沙箱 tools/temp 内执行 cmd 或 PowerShell 命令，并返回 stdout/stderr/退出码。命令工作目录默认是 tools/temp，也可以通过 cwd 指定 tools/temp 内的子目录；不得访问、修改或依赖沙箱外路径。LLM 必须拒绝任何可能操作 tools/temp 以外路径、修改系统设置、删除系统文件、停止进程/服务、提权、持久化、下载并管道执行远程代码、窃取信息或危害系统的命令，除非管理员明确要求且命令仍会被程序安全检查。执行任何 bat/cmd/ps1/py/js/vbs/sh 等脚本前，必须先用 temp_file_operation 读取并审查脚本内容，确认不会越界或危害系统；未审查脚本不得执行。适合临时计算、运行已审查脚本、处理由文件工具写入的临时文件，或进入 git clone 产生的子目录执行命令。命令可能有副作用，但只能影响 tools/temp。"
+def normalize_proxy_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "http://" + text
+    return text
+
+
+def windows_system_proxy() -> str:
+    if not sys.platform.startswith("win"):
+        return ""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as key:
+            enabled = int(winreg.QueryValueEx(key, "ProxyEnable")[0] or 0)
+            if not enabled:
+                return ""
+            server = str(winreg.QueryValueEx(key, "ProxyServer")[0] or "").strip()
+    except Exception:
+        return ""
+    if not server:
+        return ""
+    entries: dict[str, str] = {}
+    for part in server.split(";"):
+        if "=" in part:
+            name, value = part.split("=", 1)
+            entries[name.strip().lower()] = value.strip()
+    return normalize_proxy_url(entries.get("https") or entries.get("http") or server.split(";", 1)[0])
+
+
+def environment_proxy(env: dict[str, str]) -> str:
+    for key in SYSTEM_PROXY_ENV_KEYS:
+        value = normalize_proxy_url(env.get(key, ""))
+        if value:
+            return value
+    return ""
+
+
+def apply_system_proxy_env(env: dict[str, str]) -> str:
+    proxy = environment_proxy(env) or windows_system_proxy()
+    if not proxy:
+        return ""
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env[key] = proxy
+    git_config = [f"http.proxy={proxy}", f"https.proxy={proxy}"]
+    existing = env.get("GIT_CONFIG_PARAMETERS", "").strip()
+    injected = " ".join(f"'{item}'" for item in git_config)
+    env["GIT_CONFIG_PARAMETERS"] = f"{existing} {injected}".strip()
+    env.setdefault("GIT_SSL_NO_VERIFY", "false")
+    return proxy
+
+
+TOOL_DESCRIPTION = "在受限沙箱 tools/temp 内执行 cmd 或 PowerShell 命令，并返回 stdout/stderr/退出码。命令工作目录默认是 tools/temp，也可以通过 cwd 指定 tools/temp 内的子目录；不得访问、修改或依赖沙箱外路径。默认会为子进程注入系统代理环境变量；在 Windows 上会读取系统 Internet Settings 代理并转换为 HTTP_PROXY/HTTPS_PROXY，同时给 git 注入临时 http.proxy/https.proxy 配置，以便 git clone/fetch 默认走代理。LLM 必须拒绝任何可能操作 tools/temp 以外路径、修改系统设置、删除系统文件、停止进程/服务、提权、持久化、下载并管道执行远程代码、窃取信息或危害系统的命令，除非管理员明确要求且命令仍会被程序安全检查。执行任何 bat/cmd/ps1/py/js/vbs/sh 等脚本前，必须先用 temp_file_operation 读取并审查脚本内容，确认不会越界或危害系统；未审查脚本不得执行。适合临时计算、运行已审查脚本、处理由文件工具写入的临时文件，或进入 git clone 产生的子目录执行命令。命令可能有副作用，但只能影响 tools/temp。"
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -222,6 +277,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
     timeout = timeout_value(args.get("timeout_seconds"))
     env = os.environ.copy()
     env["LOCAL_ONEBOT_TOOLS_TEMP"] = str(root)
+    proxy = apply_system_proxy_env(env)
     try:
         proc = await asyncio.create_subprocess_exec(
             *shell_args(shell, command),
@@ -242,6 +298,7 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
     stderr_text = stderr.decode("utf-8", errors="replace")
     content = "\n".join([
         f"命令执行完成。shell={shell} cwd={cwd}",
+        f"system_proxy={'已注入' if proxy else '未检测到'}",
         f"exit_code={proc.returncode}",
         "stdout:",
         clipped(stdout_text or "(空)"),
