@@ -537,11 +537,43 @@ def photo_is_enabled(ctx: dict[str, Any]) -> bool:
     return bool(checker()) if callable(checker) else True
 
 
+def vndb_image_url_from_id(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        return text
+    lowered = text.lower()
+    if lowered.startswith("ch"):
+        numeric = lowered.removeprefix("ch")
+        return f"https://t.vndb.org/ch/{numeric}.jpg" if numeric.isdigit() else ""
+    if lowered.startswith("cv"):
+        numeric = lowered.removeprefix("cv")
+        return f"https://t.vndb.org/cv/{numeric}.jpg" if numeric.isdigit() else ""
+    return f"https://t.vndb.org/cv/{text}.jpg" if text.isdigit() else ""
+
+
 def detail_image_url(data: dict[str, Any]) -> str:
     image = data.get("image")
-    if not isinstance(image, dict):
-        return ""
-    return str(image.get("url") or "").strip()
+    if isinstance(image, dict):
+        url = str(image.get("url") or "").strip()
+        if url:
+            return url
+    elif image is not None:
+        url = vndb_image_url_from_id(image)
+        if url:
+            return url
+    local = data.get("local") if isinstance(data.get("local"), dict) else {}
+    url = vndb_image_url_from_id(local.get("image"))
+    if url:
+        return url
+    api = data.get("vndbApi") if isinstance(data.get("vndbApi"), dict) else {}
+    api_image = api.get("image") if isinstance(api.get("image"), dict) else None
+    if isinstance(api_image, dict):
+        return str(api_image.get("url") or "").strip()
+    return ""
 
 
 def image_extension_from_url(url: str) -> str:
@@ -571,7 +603,7 @@ async def fallback_download_detail_image(data: dict[str, Any], ctx: dict[str, An
             "user-agent": "Mozilla/5.0 local-onebot-bot VNDB image cache",
             "referer": "https://vndb.org/",
         }
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers, trust_env=True) as session:
             async with session.get(url) as resp:
                 if resp.status >= 400:
                     raise RuntimeError(f"HTTP {resp.status}")
@@ -626,8 +658,10 @@ async def execute_action(action: str, args: dict[str, Any], runtime: dict[str, A
                 record = add_image_context(runtime["event"], path, f"VNDB 详情图片已加入上下文: {path.name}")
                 images = runtime.setdefault("images", [])
                 if isinstance(images, list) and record not in images:
+                    max_images = int(ctx.get("max_context_images", 10) or 10)
+                    while len(images) >= max_images and images:
+                        images.pop(0)
                     images.append(record)
-                    del images[ctx.get("max_context_images", 10):]
                 index = images.index(record) + 1 if isinstance(images, list) and record in images else "?"
                 content += f"\n\n图片已加入当前 LLM 图片上下文。后续如需生图，可在 generate_image 的 image_indexes 中选择图{index}。"
             else:
