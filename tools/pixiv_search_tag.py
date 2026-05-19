@@ -16,7 +16,7 @@ from _pixiv_common import (
 )
 
 
-TOOL_DESCRIPTION = "搜索 Pixiv 全年龄插画候选并生成带编号的缩略图拼图给 LLM 查看。默认优先使用系统代理，自动屏蔽 R18、R18G 和 AI 生成内容。LLM 应根据用户偏好设置 sort，例如用户要热门/人气图时用 popular_safe，要最新/新图时用 date_desc，要精确 tag 匹配时用 tag_match。Pixiv 的相关 tag/联想 tag 有时并不可靠；遇到角色有多种 tag 形态、翻译名、旧译名、别名，或 xxx(作品名) 这种同名角色但作品不同的指定方式时，应主动把可能的 tag 形态放入 alternate_tags，并把作品名、角色限定词放入 required_terms 以二次过滤。注意：拼图里的编号是 Pixiv 候选编号，不是 bot 当前图片编号；如果需要某张候选背后的原图/大图，必须继续调用 pixiv_select_result，并传 search_id 与候选编号。"
+TOOL_DESCRIPTION = "搜索 Pixiv 全年龄插画候选并生成带编号的缩略图拼图仅供 LLM 内部查看和挑选。默认优先使用系统代理，自动屏蔽 R18、R18G 和 AI 生成内容。LLM 应根据用户偏好设置 sort，例如用户要热门/人气图时用 popular_safe，要最新/新图时用 date_desc，要精确 tag 匹配时用 tag_match。Pixiv 的相关 tag/联想 tag 有时并不可靠；遇到角色有多种 tag 形态、翻译名、旧译名、别名，或 xxx(作品名) 这种同名角色但作品不同的指定方式时，应主动把可能的 tag 形态放入 alternate_tags，并把作品名、角色限定词放入 required_terms 以二次过滤。强制规则：候选拼图只是工具中间产物，绝不能把候选拼图发送给用户，也不能让用户从候选拼图中挑编号，除非用户明确说要看候选/拼图/列表。普通搜图请求必须继续调用 pixiv_select_result 选择最符合的一张或多张真实原图；拼图里的编号是 Pixiv 候选编号，不是 bot 当前图片编号。"
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -92,12 +92,14 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
     except Exception as exc:
         return {"ok": False, "content": f"Pixiv 候选拼图生成失败：{ctx['exception_detail'](exc)}"}
     image_items = [
-        (path, f"Pixiv 搜索 {tag} 的候选拼图 {index}/{len(collages)}，search_id={search_id}。拼图编号不是 bot 图片编号。")
+        (path, f"Pixiv 搜索 {tag} 的候选拼图 {index}/{len(collages)}，search_id={search_id}。仅供 LLM 内部挑选候选，禁止直接发送给用户；拼图编号不是 bot 图片编号。")
         for index, path in enumerate(collages, start=1)
     ]
     image_indexes = add_images_to_runtime(image_items, runtime, ctx)
     lines = [
-        "Pixiv 搜索成功，已生成候选缩略图拼图并加入当前 LLM 图片上下文。",
+        "Pixiv 搜索成功，已生成候选缩略图拼图并加入当前 LLM 图片上下文，仅供内部视觉挑选候选使用。",
+        "强制规则：除非用户明确要求查看候选/拼图/列表，否则不要把候选拼图发给用户，也不要让用户从候选编号中选择。",
+        "普通搜图请求必须由 LLM 自行根据拼图和摘要选择候选，并继续调用 pixiv_select_result 下载真实原图/大图；选好真实图后再回答或发送真实图。",
         "警告：搜索结果已自动过滤 R18、R18G 和 AI 生成内容，但仍需人工确认内容是否符合用户需求与安全规范。",
         f"search_id: {search_id}",
         f"tag: {tag}",

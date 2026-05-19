@@ -1222,7 +1222,8 @@ def build_image_input_note(images: list[dict[str, Any]]) -> str:
     lines.append("当用户提到图1、图2、第一张、第二张时，必须按这个编号理解；不要自行交换图片顺序。")
     lines.append("如果需要直接回复某一条上下文消息，可以调用 reply_to_context_message，并使用最近上下文里标注的消息ID。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
     lines.append("如果用户只是要求把你能看到的一张或多张输入图片直接发出来、转发出来、贴出来，或是需要你通过各种手段得到的图片，而不是生成或编辑图片，必须调用 send_visible_image，并传入是否回复、回复消息ID、文字和图片编号；多张图使用 image_indexes。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
-    lines.append("Pixiv 搜索工具返回的候选拼图编号不是这里的图1/图2编号；如果需要拼图中某个缩略图背后的真实大图，必须调用 pixiv_select_result，传入 search_id 和拼图候选编号，让程序下载完整图片并把元数据与图片追加进上下文。")
+    lines.append("Pixiv 搜索候选拼图是工具中间产物，只能给 LLM 内部挑选候选使用；除非用户明确要求查看候选/拼图/列表，否则永远不要发送候选拼图，也不要让用户从候选编号中挑选。")
+    lines.append("Pixiv 搜索工具返回的候选拼图编号不是这里的图1/图2编号；普通搜图请求必须由你自行根据拼图选择候选，然后调用 pixiv_select_result 下载真实原图，再发送或使用 pixiv_select_result 返回的新 bot 图片编号。")
     lines.append("强制工具规则：只要用户问题涉及任何图片中的人物是谁、角色名、出处、作品来源、像谁、叫什么、人物身份判断，必须优先调用 animetrace_character 工具并传入对应图片编号；不得仅根据上下文、文件名、画风、模型视觉能力或聊天历史猜测后直接回答。")
     return "\n".join(lines)
 
@@ -1246,7 +1247,7 @@ def build_openai_messages(prompt: str, context_texts: list[str], context_notes: 
 
 def build_updated_tool_image_content(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     image_note = build_image_input_note(images)
-    text = "工具刚刚更新了当前 LLM 图片上下文。请查看下面重新提供的图片，并注意其中可能包含 Pixiv 候选拼图或刚下载的 Pixiv 原图。\n\n" + image_note
+    text = "工具刚刚更新了当前 LLM 图片上下文。请查看下面重新提供的图片。若其中包含 Pixiv 候选拼图，它只是内部挑选候选用的中间产物：除非用户明确要求查看候选/拼图/列表，否则不得发送候选拼图，也不得让用户从候选编号中选择；普通搜图请求应先调用 pixiv_select_result 下载真实原图。\n\n" + image_note
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     for record in images[:MAX_CONTEXT_IMAGES]:
         content.append({"type": "image_url", "image_url": {"url": image_data_url(image_path(record))}})
@@ -1274,7 +1275,8 @@ def prompt_image_source_note(images: list[dict[str, Any]]) -> str:
     lines.append("默认规则：如果触发者本人没有明确要求引用别人发的图，优先只使用触发者本人发送的图片；只有在明确回复他人消息、点名使用他人图片、或用户强烈要求跨发送者编辑时，才可以使用其他人的图片。")
     lines.append("如果用户要求你直接回复某个人或某条消息，优先调用 reply_to_context_message，并使用上下文中标注的消息ID。工具成功后不得再输出普通文本。")
     lines.append("如果用户要求直接发送、转发、贴出一张或多张可见输入图片，调用 send_visible_image 发送对应图片编号；多张图使用 image_indexes，需要贴到某条消息下方时设置 reply 和 message_id。工具成功后不得再输出普通文本。")
-    lines.append("如果可见图片是 Pixiv 候选拼图，拼图里的编号不是 bot 图片编号；必须先调用 pixiv_select_result 下载对应候选真实大图并追加元数据上下文，再使用返回的新 bot 图片编号。")
+    lines.append("Pixiv 候选拼图是工具中间产物，只能用于你内部挑选候选；除非用户明确要求查看候选/拼图/列表，否则严禁调用 send_visible_image 发送候选拼图，严禁让用户从候选编号中选择。")
+    lines.append("如果可见图片是 Pixiv 候选拼图，拼图里的编号不是 bot 图片编号；普通搜图请求必须先调用 pixiv_select_result 下载对应候选真实大图并追加元数据上下文，再使用返回的新 bot 图片编号。")
     lines.append("人物识别强制规则：涉及图中角色/人物身份、出处、名字、像谁等问题时，必须先调用 animetrace_character，不能先自行推断。")
     return "\n".join(lines)
 

@@ -21,7 +21,6 @@ MAX_CANDIDATES_PER_COLLAGE = 25
 MAX_COLLAGES = 4
 MAX_SEARCH_CANDIDATES = MAX_CANDIDATES_PER_COLLAGE * MAX_COLLAGES
 PIXIV_TIMEOUT = aiohttp.ClientTimeout(total=int(os.getenv("PIXIV_TIMEOUT_SECONDS", "45")))
-PIXIV_USE_SYSTEM_PROXY = os.getenv("PIXIV_USE_SYSTEM_PROXY", "1") != "0"
 PIXIV_COOKIE = os.getenv("PIXIV_COOKIE", "").strip()
 PIXIV_ACCEPT_LANGUAGE = os.getenv("PIXIV_ACCEPT_LANGUAGE", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7")
 SEARCH_CACHE_TTL_SECONDS = int(os.getenv("PIXIV_SEARCH_CACHE_TTL_SECONDS", "1800"))
@@ -395,13 +394,25 @@ def search_score(item: dict[str, Any], query: str, sort: str) -> tuple[Any, ...]
     return (tag_match, bookmarks * 2 + views, date)
 
 
+def pixiv_network_hint(exc: BaseException) -> str:
+    detail = str(exc)
+    if isinstance(exc, aiohttp.ClientConnectorError):
+        return f"Pixiv 网络连接失败：{detail}。已强制使用系统代理配置；如果仍失败，请确认系统代理或 HTTP_PROXY/HTTPS_PROXY 环境变量存在且能访问 Pixiv，然后重启 bot。"
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"Pixiv 网络请求超时：{detail}。请检查系统代理是否可访问 Pixiv，或调大 PIXIV_TIMEOUT_SECONDS。"
+    return detail
+
+
 async def fetch_json(url: str, params: dict[str, Any] | None = None) -> Any:
-    async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=REQUEST_HEADERS, trust_env=PIXIV_USE_SYSTEM_PROXY) as session:
-        async with session.get(url, params=params) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(f"Pixiv HTTP {resp.status}: {text[:300]}")
-            return json.loads(text)
+    try:
+        async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=REQUEST_HEADERS, trust_env=True) as session:
+            async with session.get(url, params=params) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    raise RuntimeError(f"Pixiv HTTP {resp.status}: {text[:300]}")
+                return json.loads(text)
+    except Exception as exc:
+        raise RuntimeError(pixiv_network_hint(exc)) from exc
 
 
 async def enrich_candidate_details(candidates: list[dict[str, Any]], limit: int = PIXIV_DETAIL_ENRICH_LIMIT) -> None:
@@ -586,12 +597,16 @@ async def download_url(url: str, target_dir: Path, prefix: str) -> Path:
     if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
         suffix = ".jpg"
     target = target_dir / f"{prefix}_{uuid.uuid4().hex}{suffix}"
-    async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=IMAGE_HEADERS, trust_env=PIXIV_USE_SYSTEM_PROXY) as session:
-        async with session.get(url) as resp:
-            if resp.status >= 400:
-                text = await resp.text()
-                raise RuntimeError(f"图片下载失败 HTTP {resp.status}: {text[:200]}")
-            target.write_bytes(await resp.read())
+    try:
+        async with aiohttp.ClientSession(timeout=PIXIV_TIMEOUT, headers=IMAGE_HEADERS, trust_env=True) as session:
+            async with session.get(url) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    raise RuntimeError(f"图片下载失败 HTTP {resp.status}: {text[:200]}")
+                target.write_bytes(await resp.read())
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        raise RuntimeError(pixiv_network_hint(exc)) from exc
     return normalize_image_file(target)
 
 

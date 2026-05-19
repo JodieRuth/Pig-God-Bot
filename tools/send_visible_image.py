@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TOOL_DESCRIPTION = "直接把 LLM 当前可见的一张或多张输入图片原样发到当前会话，可选择是否作为对指定上下文消息的回复发送，并可附带一段文字。适用于用户要求把上文某张/多张图直接发出来、转发出来、贴出来，或判断不需要生图/改图、只需要发送它能看到的输入图片时。image_index/image_indexes 必须来自当前输入图片编号：图1 是第一张输入图片，图2 是第二张。调用成功后机器人已经完成本轮回答，不需要再输出普通文本。"
+TOOL_DESCRIPTION = "直接把 LLM 当前可见的一张或多张输入图片原样发到当前会话，可选择是否作为对指定上下文消息的回复发送，并可附带一段文字。仅适用于用户明确要求把上文某张/多张图直接发出来、转发出来、贴出来，或判断不需要生图/改图、只需要发送它能看到的非中间产物输入图片时。严禁发送 Pixiv 候选拼图、搜索候选列表拼图或任何工具中间产物，除非用户明确要求查看候选/拼图/列表；普通 Pixiv 搜图请求必须先用 pixiv_select_result 下载真实原图后再发送真实图。image_index/image_indexes 必须来自当前输入图片编号：图1 是第一张输入图片，图2 是第二张。调用成功后机器人已经完成本轮回答，不需要再输出普通文本。"
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -66,6 +66,12 @@ def valid_message_ids(runtime: dict[str, Any]) -> set[str]:
     return values
 
 
+def is_pixiv_candidate_collage(image: dict[str, Any]) -> bool:
+    text = " ".join(str(image.get(key) or "") for key in ("text", "label", "sender_name", "path"))
+    lowered = text.lower()
+    return "pixiv" in lowered and ("候选拼图" in text or "candidate" in lowered or "collage" in lowered)
+
+
 def selected_image(runtime: dict[str, Any], image_index: Any) -> dict[str, Any] | None:
     try:
         index = int(image_index)
@@ -108,6 +114,12 @@ def bool_arg(value: Any) -> bool:
     return bool(value)
 
 
+def user_explicitly_requests_candidates(runtime: dict[str, Any]) -> bool:
+    prompt = str(runtime.get("prompt") or "").lower()
+    keywords = ("候选", "拼图", "列表", "预览", "缩略图", "看看有哪些", "给我看选项", "candidate", "collage", "preview", "thumbnail", "list")
+    return any(keyword in prompt for keyword in keywords)
+
+
 def image_segment(image: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
     path = ctx["image_path"](image)
     return {"type": "image", "data": {"file": path.as_uri()}}
@@ -126,6 +138,8 @@ async def execute(args: dict[str, Any], runtime: dict[str, Any], ctx: dict[str, 
     images, indexes = selected_images(runtime, args)
     if not images:
         return {"ok": False, "content": "发送图片失败：image_index/image_indexes 不在当前可用图片编号中。"}
+    if any(is_pixiv_candidate_collage(image) for image in images) and not user_explicitly_requests_candidates(runtime):
+        return {"ok": False, "content": "发送图片失败：选中的图片包含 Pixiv 候选拼图。候选拼图是内部中间产物，普通搜图请求必须先调用 pixiv_select_result 下载真实原图；只有用户明确要求查看候选/拼图/列表时才允许发送候选拼图。"}
     text = str(args.get("text") or "").strip()
     should_reply = bool_arg(args.get("reply"))
     message_id = str(args.get("message_id") or args.get("reply_message_id") or "").strip()
