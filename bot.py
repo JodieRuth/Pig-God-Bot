@@ -72,9 +72,100 @@ def clear_cache_dir() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _force_remove_readonly(func: Any, path: str, exc_info: Any) -> None:
+    try:
+        os.chmod(path, 0o700)
+        func(path)
+    except Exception:
+        raise
+
+
+def _chmod_tree(path: Path) -> None:
+    if not path.exists():
+        return
+    for item in sorted(path.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        try:
+            os.chmod(item, 0o700)
+        except OSError:
+            pass
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def _powershell_force_remove(path: Path) -> bool:
+    if not path.exists():
+        return True
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "$p=$args[0]; if (Test-Path -LiteralPath $p) { Get-ChildItem -LiteralPath $p -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object { try { $_.Attributes = 'Normal' } catch {} }; Remove-Item -LiteralPath $p -Force -Recurse -ErrorAction Stop }",
+                str(path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+        )
+        return result.returncode == 0 or not path.exists()
+    except Exception:
+        return False
+
+
+def _clear_temp_contents(path: Path) -> None:
+    if not path.exists():
+        return
+    for item in list(path.iterdir()):
+        try:
+            if item.is_dir():
+                shutil.rmtree(item, onerror=_force_remove_readonly)
+            else:
+                os.chmod(item, 0o700)
+                item.unlink()
+            continue
+        except OSError:
+            pass
+        if _powershell_force_remove(item):
+            continue
+        pending = path / f"_delete_pending_{item.name}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        try:
+            item.rename(pending)
+        except OSError:
+            pass
+
+
+def _rename_locked_temp_dir(path: Path) -> bool:
+    if not path.exists():
+        return True
+    target = path.with_name(f"{path.name}_delete_pending_{int(time.time())}_{uuid.uuid4().hex[:8]}")
+    try:
+        path.rename(target)
+    except OSError:
+        return False
+    _powershell_force_remove(target)
+    try:
+        shutil.rmtree(target, onerror=_force_remove_readonly)
+    except OSError:
+        pass
+    return True
+
+
 def clear_tools_temp_dir() -> None:
     if TOOLS_TEMP_DIR.exists():
-        shutil.rmtree(TOOLS_TEMP_DIR)
+        _chmod_tree(TOOLS_TEMP_DIR)
+        try:
+            shutil.rmtree(TOOLS_TEMP_DIR, onerror=_force_remove_readonly)
+        except OSError:
+            if not _powershell_force_remove(TOOLS_TEMP_DIR):
+                if not _rename_locked_temp_dir(TOOLS_TEMP_DIR):
+                    _clear_temp_contents(TOOLS_TEMP_DIR)
     TOOLS_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
