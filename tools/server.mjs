@@ -188,27 +188,19 @@ async function fetchJson(url) {
   return JSON.parse(buffer.toString('utf8'));
 }
 
-async function fetchBytes(url, options = {}) {
-  return fetchWithFallback(`Fetch bytes ${url}`, url, options, 300000);
+async function fetchBytes(url, options = {}, timeoutMs = 300000) {
+  return fetchWithFallback(`Fetch bytes ${url}`, url, options, timeoutMs);
 }
 
 async function postJson(url, payload) {
   return withRetries(`POST JSON ${url}`, async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-      const textValue = await response.text();
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${textValue}`);
-      return textValue ? JSON.parse(textValue) : null;
-    } finally {
-      clearTimeout(timeout);
-    }
+    const buffer = await fetchBytes(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(payload)
+    }, 60000);
+    const textValue = buffer.toString('utf8');
+    return textValue ? JSON.parse(textValue) : null;
   });
 }
 
@@ -1347,9 +1339,14 @@ function pickBestLocalTarget(input) {
 function vndbImageUrlFromId(imageId) {
   if (!imageId) return null;
   if (/^https?:\/\//i.test(imageId)) return imageId;
-  const value = String(imageId);
-  const numeric = value.replace(/^cv/i, '');
-  return /^\d+$/.test(numeric) ? `https://t.vndb.org/cv/${numeric}.jpg` : null;
+  const value = String(imageId).trim();
+  const normalized = value.toLocaleLowerCase();
+  if (/^\d+$/.test(normalized)) return `https://t.vndb.org/cv/${normalized}.jpg`;
+  const prefixed = normalized.match(/^(cv|ch)\/?(\d+)$/i);
+  if (prefixed) return `https://t.vndb.org/${prefixed[1].toLocaleLowerCase()}/${prefixed[2]}.jpg`;
+  const sharded = normalized.match(/^(cv|ch)\/(\d{2})\/(\d+)\.\w+$/i);
+  if (sharded) return `https://t.vndb.org/${sharded[1].toLocaleLowerCase()}/${sharded[2]}/${sharded[3]}.jpg`;
+  return null;
 }
 
 function extensionFromContentType(contentType, fallback = '.jpg') {
@@ -1361,22 +1358,25 @@ function extensionFromContentType(contentType, fallback = '.jpg') {
   return fallback;
 }
 
+function extensionFromImageUrl(url, fallback = '.jpg') {
+  const suffix = new URL(url).pathname.split('/').pop()?.match(/\.(jpg|jpeg|png|webp|gif)$/i)?.[0]?.toLocaleLowerCase();
+  if (!suffix) return fallback;
+  return suffix === '.jpeg' ? '.jpg' : suffix;
+}
+
 async function downloadImageToCache(url, key) {
   if (!url) return null;
   await mkdir(IMAGE_CACHE_DIR, { recursive: true });
   const safeKey = String(key).replace(/[^a-z0-9_-]/gi, '_');
   const existing = ['.jpg', '.png', '.webp', '.gif'].map((ext) => join(IMAGE_CACHE_DIR, `${safeKey}${ext}`)).find((path) => existsSync(path));
   if (existing) return { url, localPath: existing, cached: true };
-  const response = await fetch(url, {
-    headers: {
-      accept: 'image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8',
-      'user-agent': 'Mozilla/5.0 local-onebot-bot VNDB image cache',
-      referer: 'https://vndb.org/'
-    }
-  });
-  if (!response.ok) throw new Error(`Image download failed ${url}: HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const ext = extensionFromContentType(response.headers.get('content-type'));
+  const headers = {
+    accept: 'image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8',
+    'user-agent': 'Mozilla/5.0 local-onebot-bot VNDB image cache',
+    referer: 'https://vndb.org/'
+  };
+  const buffer = await fetchBytes(url, { headers }, 300000);
+  const ext = extensionFromImageUrl(url);
   const localPath = join(IMAGE_CACHE_DIR, `${safeKey}${ext}`);
   await writeFile(localPath, buffer);
   return { url, localPath, cached: false, bytes: buffer.length };
@@ -1428,7 +1428,7 @@ function omitDuplicateLocalFields(local, remote) {
 async function vndbApiDetail(input) {
   const target = pickBestLocalTarget(input);
   const downloadImage = Boolean(input.downloadImage ?? input.image ?? true);
-  const localImageUrl = target.type === 'vn' ? vndbImageUrlFromId(target.local.image) : null;
+  const localImageUrl = vndbImageUrlFromId(target.local.image);
   const fields = target.type === 'vn'
     ? input.fields ?? 'id,title,alttitle,aliases,olang,released,languages,platforms,image.url,image.sexual,image.violence,image.votecount,image.dims,length,length_minutes,description,rating,votecount,tags.rating,tags.spoiler,tags.lie,tags.id,tags.name,developers.id,developers.name,relations.id,relations.relation,relations.title'
     : input.fields ?? 'id,name,original,aliases,description,image.url,image.sexual,image.violence,image.votecount,image.dims,sex,blood_type,height,weight,bust,waist,hips,birthday,age,traits.id,traits.name,traits.spoiler,traits.lie,vns.id,vns.title,vns.role,vns.spoiler';

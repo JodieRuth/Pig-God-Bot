@@ -552,7 +552,9 @@ def vndb_image_url_from_id(value: Any) -> str:
     if lowered.startswith("cv"):
         numeric = lowered.removeprefix("cv")
         return f"https://t.vndb.org/cv/{numeric}.jpg" if numeric.isdigit() else ""
-    return f"https://t.vndb.org/cv/{text}.jpg" if text.isdigit() else ""
+    if lowered.isdigit():
+        return f"https://t.vndb.org/cv/{lowered}.jpg"
+    return ""
 
 
 def detail_image_url(data: dict[str, Any]) -> str:
@@ -647,6 +649,12 @@ async def execute_action(action: str, args: dict[str, Any], runtime: dict[str, A
         return {"ok": False, "content": f"VNDB 工具调用失败：{ctx['exception_detail'](exc)}"}
     content = await content_for(f"VNDB {action} 调用成功", payload, data, action)
     if action == "detail" and photo_is_enabled(ctx):
+        image_data = data.get("image") if isinstance(data.get("image"), dict) else {}
+        cache_error = image_data.get("cacheError") if isinstance(image_data, dict) else None
+        if cache_error:
+            logger = ctx.get("log")
+            if callable(logger):
+                logger(f"VNDB JSON Server image cache unavailable: {cache_error}")
         path = detail_image_path(data)
         if not path:
             path = await fallback_download_detail_image(data, ctx)
