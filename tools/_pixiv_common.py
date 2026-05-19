@@ -498,6 +498,21 @@ async def fetch_pixiv_search_page(tag: str, page: int) -> list[Any]:
     return extract_search_items(data)
 
 
+async def fetch_pixiv_title_search_page(query: str, page: int) -> list[Any]:
+    params = {
+        "word": query,
+        "order": "date_d",
+        "mode": "safe",
+        "p": page,
+        "s_mode": "s_tc",
+        "type": "illust_and_ugoira",
+        "lang": "zh",
+        "ai_type": 1,
+    }
+    data = await fetch_json(f"{PIXIV_AJAX}/search/illustrations/{quote(query)}", params)
+    return extract_search_items(data)
+
+
 async def pixiv_search_tag(tag: str, pages: int, sort: str, min_bookmarks: int = 0, alternate_tags: list[str] | None = None, required_terms: list[str] | None = None) -> list[dict[str, Any]]:
     sort = normalize_sort(sort)
     pages = limited_int(pages, 1, 1, MAX_COLLAGES)
@@ -536,6 +551,44 @@ async def pixiv_search_tag(tag: str, pages: int, sort: str, min_bookmarks: int =
             for item in collected:
                 item["min_bookmarks_fallback"] = True
     score_query = " ".join(base_tags + required)
+    collected.sort(key=lambda item: search_score(item, score_query, sort), reverse=True)
+    return collected[:pages * MAX_CANDIDATES_PER_COLLAGE]
+
+
+async def pixiv_search_title(query: str, pages: int, sort: str, min_bookmarks: int = 0, required_terms: list[str] | None = None) -> list[dict[str, Any]]:
+    sort = normalize_sort(sort)
+    pages = limited_int(pages, 1, 1, MAX_COLLAGES)
+    min_bookmarks = limited_int(min_bookmarks, 0, 0, 1_000_000)
+    required = list_arg(required_terms)
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for page in range(1, pages + 1):
+        items = await fetch_pixiv_title_search_page(query, page)
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            item = normalize_search_item(raw)
+            if not item or item["pid"] in seen:
+                continue
+            item.setdefault("matched_title_query", query)
+            seen.add(item["pid"])
+            collected.append(item)
+    await enrich_candidate_details(collected)
+    if required:
+        filtered_by_terms = [item for item in collected if matches_required_terms(item, required)]
+        if filtered_by_terms:
+            collected = filtered_by_terms
+        else:
+            for item in collected:
+                item["required_terms_fallback"] = True
+    if min_bookmarks > 0:
+        filtered = [item for item in collected if int(item.get("bookmark_count") or 0) >= min_bookmarks]
+        if filtered:
+            collected = filtered
+        else:
+            for item in collected:
+                item["min_bookmarks_fallback"] = True
+    score_query = " ".join([query] + required)
     collected.sort(key=lambda item: search_score(item, score_query, sort), reverse=True)
     return collected[:pages * MAX_CANDIDATES_PER_COLLAGE]
 

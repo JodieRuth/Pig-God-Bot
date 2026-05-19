@@ -1223,6 +1223,7 @@ def build_image_input_note(images: list[dict[str, Any]]) -> str:
     lines.append("如果需要直接回复某一条上下文消息，可以调用 reply_to_context_message，并使用最近上下文里标注的消息ID。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
     lines.append("如果用户只是要求把你能看到的一张或多张输入图片直接发出来、转发出来、贴出来，或是需要你通过各种手段得到的图片，而不是生成或编辑图片，必须调用 send_visible_image，并传入是否回复、回复消息ID、文字和图片编号；多张图使用 image_indexes。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
     lines.append("Pixiv 搜索候选拼图是工具中间产物，只能给 LLM 内部挑选候选使用；除非用户明确要求查看候选/拼图/列表，否则永远不要发送候选拼图，也不要让用户从候选编号中挑选。")
+    lines.append("Pixiv tag 搜索无结果、结果明显不相关、或不确定实际 tag 名时，必须尝试 pixiv_search_title 用标题/说明关键词搜索，并从候选摘要 tags 反查真实 Pixiv tag；普通搜图请求仍需自行选候选。")
     lines.append("Pixiv 搜索工具返回的候选拼图编号不是这里的图1/图2编号；普通搜图请求必须由你自行根据拼图选择候选，然后调用 pixiv_select_result 下载真实原图，再发送或使用 pixiv_select_result 返回的新 bot 图片编号。")
     lines.append("强制工具规则：只要用户问题涉及任何图片中的人物是谁、角色名、出处、作品来源、像谁、叫什么、人物身份判断，必须优先调用 animetrace_character 工具并传入对应图片编号；不得仅根据上下文、文件名、画风、模型视觉能力或聊天历史猜测后直接回答。")
     return "\n".join(lines)
@@ -1276,6 +1277,7 @@ def prompt_image_source_note(images: list[dict[str, Any]]) -> str:
     lines.append("如果用户要求你直接回复某个人或某条消息，优先调用 reply_to_context_message，并使用上下文中标注的消息ID。工具成功后不得再输出普通文本。")
     lines.append("如果用户要求直接发送、转发、贴出一张或多张可见输入图片，调用 send_visible_image 发送对应图片编号；多张图使用 image_indexes，需要贴到某条消息下方时设置 reply 和 message_id。工具成功后不得再输出普通文本。")
     lines.append("Pixiv 候选拼图是工具中间产物，只能用于你内部挑选候选；除非用户明确要求查看候选/拼图/列表，否则严禁调用 send_visible_image 发送候选拼图，严禁让用户从候选编号中选择。")
+    lines.append("Pixiv tag 搜索无结果、结果明显不相关、或不确定实际 tag 名时，必须尝试 pixiv_search_title 用标题/说明关键词搜索，并从候选 tags 反查真实 Pixiv tag。")
     lines.append("如果可见图片是 Pixiv 候选拼图，拼图里的编号不是 bot 图片编号；普通搜图请求必须先调用 pixiv_select_result 下载对应候选真实大图并追加元数据上下文，再使用返回的新 bot 图片编号。")
     lines.append("人物识别强制规则：涉及图中角色/人物身份、出处、名字、像谁等问题时，必须先调用 animetrace_character，不能先自行推断。")
     return "\n".join(lines)
@@ -1384,7 +1386,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             if "reasoning_content" in message:
                 assistant_message["reasoning_content"] = message.get("reasoning_content") or ""
             messages.append(assistant_message)
-            context_mutating_tool_names = {"vndb_detail", "pixiv_search_tag", "pixiv_detail", "pixiv_select_result"}
+            context_mutating_tool_names = {"vndb_detail", "pixiv_search_tag", "pixiv_search_title", "pixiv_detail", "pixiv_select_result"}
             has_context_mutating_tool = any(
                 str((tool_call.get("function", {}) if isinstance(tool_call, dict) else {}).get("name") or "").strip().lower() in context_mutating_tool_names
                 for tool_call in tool_calls
