@@ -373,6 +373,9 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         return
 
     common.flush_idle_data()
+    clear_tools_temp_dir = ctx.get("clear_tools_temp_dir")
+    if callable(clear_tools_temp_dir):
+        clear_tools_temp_dir()
     await ctx["reply"](event, "正在从 GitHub 下载更新，完成后将自动重启。")
 
     bot_root = Path(__file__).resolve().parent.parent
@@ -452,6 +455,8 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     pending_file = bot_root / PENDING_UPDATE_FILE
     pending_file.write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
 
+    if callable(clear_tools_temp_dir):
+        clear_tools_temp_dir()
     ctx["bot_state"]["stopped"] = True
     stop_vndb_json_server = ctx.get("stop_vndb_json_server")
     if callable(stop_vndb_json_server):

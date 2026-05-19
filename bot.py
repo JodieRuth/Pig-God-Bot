@@ -27,6 +27,7 @@ CACHE_DIR = CACHE_ROOT / "images"
 OUTPUT_DIR = ROOT / "outputs"
 COMMAND_DIR = ROOT / "command"
 TOOLS_DIR = ROOT / "tools"
+TOOLS_TEMP_DIR = TOOLS_DIR / "temp"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 PLUGIN_DIR = ROOT / "plugins"
@@ -71,7 +72,14 @@ def clear_cache_dir() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def clear_tools_temp_dir() -> None:
+    if TOOLS_TEMP_DIR.exists():
+        shutil.rmtree(TOOLS_TEMP_DIR)
+    TOOLS_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+
 clear_cache_dir()
+TOOLS_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 COMMAND_DIR.mkdir(parents=True, exist_ok=True)
 PLUGIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -2130,6 +2138,7 @@ async def write_pending_restart_message(event: dict[str, Any], message: str, rep
 
 async def reboot_process(event: dict[str, Any] | None = None, done_message: str = "重启完成，bot 已重新上线。", report_services: bool = False) -> None:
     log("Reboot requested, replacing current process")
+    clear_tools_temp_dir()
     if event is not None:
         await write_pending_restart_message(event, done_message, report_services=report_services)
     await force_reset_managed_services()
@@ -2179,6 +2188,8 @@ def command_context() -> dict[str, Any]:
         "reload_runtime_files": reload_runtime_files,
         "tool_infos": [item.copy() for item in TOOL_INFOS],
         "tool_definitions": [tool.copy() for tool in TOOL_DEFINITIONS],
+        "tools_temp_dir": TOOLS_TEMP_DIR,
+        "clear_tools_temp_dir": clear_tools_temp_dir,
         "output_dir": OUTPUT_DIR,
         "max_context_images": MAX_CONTEXT_IMAGES,
         "max_context_messages": MAX_CONTEXT_MESSAGES,
