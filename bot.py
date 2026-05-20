@@ -263,6 +263,7 @@ def env_active_runtime_state() -> dict[str, Any]:
         "image": {"api_index": os.getenv("ACTIVE_IMAGE_API_INDEX", "0"), "model": os.getenv("ACTIVE_IMAGE_MODEL", IMAGE_MODEL)},
         "prompt": {"id": os.getenv("ACTIVE_PROMPT_ID", "1")},
         "photo": {"enabled": os.getenv("ACTIVE_PHOTO_ENABLED", "1") != "0"},
+        "stream": {"enabled": os.getenv("ACTIVE_STREAM_ENABLED", "1") != "0"},
     }
 
 
@@ -528,6 +529,18 @@ def set_photo_enabled(enabled: bool) -> bool:
     runtime_state.setdefault("photo", {})["enabled"] = bool(enabled)
     save_runtime_state(runtime_state)
     set_env_value("ACTIVE_PHOTO_ENABLED", "1" if enabled else "0")
+    return True
+
+
+def stream_enabled() -> bool:
+    stream_state = runtime_state.get("stream", {})
+    return bool(stream_state.get("enabled", True)) if isinstance(stream_state, dict) else True
+
+
+def set_stream_enabled(enabled: bool) -> bool:
+    runtime_state.setdefault("stream", {})["enabled"] = bool(enabled)
+    save_runtime_state(runtime_state)
+    set_env_value("ACTIVE_STREAM_ENABLED", "1" if enabled else "0")
     return True
 
 
@@ -1462,58 +1475,77 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                 if name:
                     tool_names.append(name)
         log(f"LLM enabled tools: {', '.join(tool_names) if tool_names else 'none'}")
-        payload = {
+        use_stream = stream_enabled()
+        payload: dict[str, Any] = {
             "model": llm_model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
-            "stream": True,
         }
-        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto", "stream": True}, "headers": headers})
+        if use_stream:
+            payload["stream"] = True
+        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto", "stream": use_stream}, "headers": headers})
         await LLM_RPM_LIMITER.acquire()
-        content_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_call_chunks: dict[int, dict[str, Any]] = {}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.post(llm_url, json=payload, timeout=600) as resp:
-                if resp.status >= 400:
+        message: dict[str, Any]
+        tool_calls: list[dict[str, Any]] = []
+        if use_stream:
+            content_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            tool_call_chunks: dict[int, dict[str, Any]] = {}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(llm_url, json=payload, timeout=600) as resp:
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        log(f"LLM response status={resp.status} body={text[:1000]}")
+                        raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
+                    async for data_text in iter_sse_data(resp):
+                        if not data_text or data_text == "[DONE]":
+                            continue
+                        try:
+                            chunk = json.loads(data_text)
+                        except json.JSONDecodeError:
+                            log(f"LLM SSE unparseable chunk: {sanitize_error_detail(data_text, 300)}")
+                            continue
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = (choices[0] or {}).get("delta") or {}
+                        if "content" in delta and delta["content"]:
+                            content_parts.append(str(delta["content"]))
+                        if "reasoning_content" in delta and delta["reasoning_content"]:
+                            reasoning_parts.append(str(delta["reasoning_content"]))
+                        for tc in delta.get("tool_calls") or []:
+                            idx = tc.get("index", 0)
+                            if idx not in tool_call_chunks:
+                                tool_call_chunks[idx] = {"id": tc.get("id") or "", "function": {"name": "", "arguments": ""}}
+                            entry = tool_call_chunks[idx]
+                            if tc.get("id"):
+                                entry["id"] = tc["id"]
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                entry["function"]["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                entry["function"]["arguments"] += fn["arguments"]
+            content = "".join(content_parts)
+            reasoning_content = "".join(reasoning_parts)
+            tool_calls = [tool_call_chunks[i] for i in sorted(tool_call_chunks.keys())]
+            message = {"role": "assistant", "content": content}
+            if reasoning_content:
+                message["reasoning_content"] = reasoning_content
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+            log(f"LLM streaming reply: content_len={len(content)} tool_calls={len(tool_calls)} reasoning_len={len(reasoning_content)}")
+        else:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(llm_url, json=payload, timeout=600) as resp:
                     text = await resp.text()
-                    log(f"LLM response status={resp.status} body={text[:1000]}")
-                    raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
-                async for data_text in iter_sse_data(resp):
-                    if not data_text or data_text == "[DONE]":
-                        continue
-                    try:
-                        chunk = json.loads(data_text)
-                    except json.JSONDecodeError:
-                        log(f"LLM SSE unparseable chunk: {sanitize_error_detail(data_text, 300)}")
-                        continue
-                    delta = (chunk.get("choices", [{}])[0] or {}).get("delta") or {}
-                    if "content" in delta and delta["content"]:
-                        content_parts.append(str(delta["content"]))
-                    if "reasoning_content" in delta and delta["reasoning_content"]:
-                        reasoning_parts.append(str(delta["reasoning_content"]))
-                    for tc in delta.get("tool_calls") or []:
-                        idx = tc.get("index", 0)
-                        if idx not in tool_call_chunks:
-                            tool_call_chunks[idx] = {"id": tc.get("id") or "", "function": {"name": "", "arguments": ""}}
-                        entry = tool_call_chunks[idx]
-                        if tc.get("id"):
-                            entry["id"] = tc["id"]
-                        fn = tc.get("function") or {}
-                        if fn.get("name"):
-                            entry["function"]["name"] += fn["name"]
-                        if fn.get("arguments"):
-                            entry["function"]["arguments"] += fn["arguments"]
-        content = "".join(content_parts)
-        reasoning_content = "".join(reasoning_parts)
-        tool_calls = [tool_call_chunks[i] for i in sorted(tool_call_chunks.keys())]
-        message: dict[str, Any] = {"role": "assistant", "content": content}
-        if reasoning_content:
-            message["reasoning_content"] = reasoning_content
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-        log(f"LLM streaming reply: content_len={len(content)} tool_calls={len(tool_calls)} reasoning_len={len(reasoning_content)}")
+            log(f"LLM response status={resp.status} body={text[:1000]}")
+            if resp.status >= 400:
+                raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
+            data = json.loads(text)
+            message = data["choices"][0]["message"]
+            tool_calls = message.get("tool_calls") or []
+            log(f"LLM non-streaming reply: content_len={len(str(message.get('content') or ''))} tool_calls={len(tool_calls)}")
         if tool_calls:
             log_json("LLM tool calls", tool_calls)
             assistant_message = {"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls}
@@ -2303,6 +2335,8 @@ def command_context() -> dict[str, Any]:
         "set_active_prompt": set_active_prompt,
         "set_photo_enabled": set_photo_enabled,
         "photo_enabled": photo_enabled,
+        "set_stream_enabled": set_stream_enabled,
+        "stream_enabled": stream_enabled,
         "admin_users": ADMIN_USERS,
         "bot_qq": BOT_QQ,
         "clear_contexts": clear_all_contexts,
