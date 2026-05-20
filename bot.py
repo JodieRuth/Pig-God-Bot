@@ -1467,18 +1467,53 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
+            "stream": True,
         }
-        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto"}, "headers": headers})
+        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto", "stream": True}, "headers": headers})
         await LLM_RPM_LIMITER.acquire()
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_call_chunks: dict[int, dict[str, Any]] = {}
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.post(llm_url, json=payload, timeout=600) as resp:
-                text = await resp.text()
-        log(f"LLM response status={resp.status} body={text[:1000]}")
-        if resp.status >= 400:
-            raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
-        data = json.loads(text)
-        message = data["choices"][0]["message"]
-        tool_calls = message.get("tool_calls") or []
+                if resp.status >= 400:
+                    text = await resp.text()
+                    log(f"LLM response status={resp.status} body={text[:1000]}")
+                    raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
+                async for data_text in iter_sse_data(resp):
+                    if not data_text or data_text == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data_text)
+                    except json.JSONDecodeError:
+                        log(f"LLM SSE unparseable chunk: {sanitize_error_detail(data_text, 300)}")
+                        continue
+                    delta = (chunk.get("choices", [{}])[0] or {}).get("delta") or {}
+                    if "content" in delta and delta["content"]:
+                        content_parts.append(str(delta["content"]))
+                    if "reasoning_content" in delta and delta["reasoning_content"]:
+                        reasoning_parts.append(str(delta["reasoning_content"]))
+                    for tc in delta.get("tool_calls") or []:
+                        idx = tc.get("index", 0)
+                        if idx not in tool_call_chunks:
+                            tool_call_chunks[idx] = {"id": tc.get("id") or "", "function": {"name": "", "arguments": ""}}
+                        entry = tool_call_chunks[idx]
+                        if tc.get("id"):
+                            entry["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            entry["function"]["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            entry["function"]["arguments"] += fn["arguments"]
+        content = "".join(content_parts)
+        reasoning_content = "".join(reasoning_parts)
+        tool_calls = [tool_call_chunks[i] for i in sorted(tool_call_chunks.keys())]
+        message: dict[str, Any] = {"role": "assistant", "content": content}
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        log(f"LLM streaming reply: content_len={len(content)} tool_calls={len(tool_calls)} reasoning_len={len(reasoning_content)}")
         if tool_calls:
             log_json("LLM tool calls", tool_calls)
             assistant_message = {"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls}
