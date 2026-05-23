@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import random
 import importlib.util
@@ -12,65 +11,10 @@ from typing import Any
 DATA_DIR = Path(__file__).with_name("zhubi")
 DATA_FILE = DATA_DIR / "data.json"
 DAILY_LIMIT = 1
-MAX_UNIT = 2147483647
-CLEAR_THRESHOLD = MAX_UNIT * MAX_UNIT
-DECIMAL_PRECISION = 5
-DECIMAL_FACTOR = 10 ** DECIMAL_PRECISION
 
 
 def today_key() -> str:
     return date.today().isoformat()
-
-
-def truncate_decimal(value: float) -> float:
-    return math.floor(max(0.0, float(value)) * DECIMAL_FACTOR) / DECIMAL_FACTOR
-
-
-def balance_of_value(value: float) -> float:
-    return truncate_decimal(float(value))
-
-
-def format_number(value: int | float) -> str:
-    return f"{int(truncate_decimal(value)):,}"
-
-
-def format_balance(value: int | float) -> str:
-    amount = max(0.0, float(value))
-    max_count = int(amount // MAX_UNIT)
-    remainder = truncate_decimal(amount - max_count * MAX_UNIT)
-    remainder_text = format_number(remainder)
-    if max_count <= 0:
-        return remainder_text
-    return f"{max_count:,}MAX+{remainder_text}"
-
-
-def parse_amount_value(value: str) -> float | None:
-    text = value.strip().upper().replace(",", "")
-    if not text:
-        return None
-    if "MAX" in text:
-        left, sep, right = text.partition("MAX")
-        if not sep or not left:
-            return None
-        if right.startswith("+"):
-            right = right[1:]
-        elif right:
-            return None
-        try:
-            max_count = float(left)
-            coins = float(right) if right else 0.0
-        except ValueError:
-            return None
-        if max_count < 0 or coins < 0:
-            return None
-        return truncate_decimal(max_count * MAX_UNIT + coins)
-    try:
-        amount = float(text)
-    except ValueError:
-        return None
-    if amount < 0:
-        return None
-    return truncate_decimal(amount)
 
 
 def default_mine_state() -> dict[str, Any]:
@@ -101,7 +45,7 @@ def normalize_mine_state(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_user_data(user: dict[str, Any]) -> dict[str, Any]:
-    user["balance"] = balance_of_value(float(user.get("balance", 0.0)))
+    user["balance"] = truncate_decimal(float(user.get("balance", 0.0)))
     user.setdefault("daily_claims", 0)
     user.setdefault("daily_claimed", 0)
     user.setdefault("daily_fakuang_used", 0)
@@ -236,9 +180,9 @@ async def handle_add(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> bo
     target_id, amount = parsed
     data = load_data()
     target = user_data(data, target_id)
-    target["balance"] = balance_of_value(float(target.get("balance", 0.0)) + float(amount))
+    target["balance"] = truncate_decimal(float(target.get("balance", 0.0)) + float(amount))
     save_data(data)
-    await ctx["reply"](event, f"已为 QQ {target_id} 增加 {format_balance(amount)}，当前余额：{format_balance(target['balance'])}。")
+    await ctx["reply"](event, f"已为 QQ {target_id} 增加 {format_amount(amount)}，当前余额：{format_amount(target['balance'])}。")
     return True
 
 
@@ -285,20 +229,20 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         return
     is_admin = ctx["is_admin_event"](event)
     if not is_admin and float(user.get("daily_claims", 0)) >= DAILY_LIMIT:
-        await ctx["reply"](event, f"你今天已经领过 {DAILY_LIMIT} 次猪币了，当前余额：{format_balance(user['balance'])}。")
+        await ctx["reply"](event, f"你今天已经领过 {DAILY_LIMIT} 次猪币了，当前余额：{format_amount(user['balance'])}。")
         return
     amount = random.randint(1, 3000)
-    user["balance"] = balance_of_value(float(user.get("balance", 0.0)) + float(amount))
+    user["balance"] = truncate_decimal(float(user.get("balance", 0.0)) + float(amount))
     user["daily_claims"] = int(user.get("daily_claims", 0)) + 1
     user["daily_claimed"] = int(user.get("daily_claimed", 0)) + amount
     user["total_claimed"] = int(user.get("total_claimed", 0)) + amount
     data["global"]["total_claimed"] = int(data["global"].get("total_claimed", 0)) + amount
     save_data(data)
     if is_admin:
-        await ctx["reply"](event, f"你获得了 {format_balance(amount)}。当前持有：{format_balance(user['balance'])}。")
+        await ctx["reply"](event, f"你获得了 {format_amount(amount)}。当前持有：{format_amount(user['balance'])}。")
         return
     remaining = DAILY_LIMIT - int(user.get("daily_claims", 0))
-    await ctx["reply"](event, f"你获得了 {format_balance(amount)}，当前持有：{format_balance(user['balance'])}。今日剩余领取次数：{remaining}。")
+    await ctx["reply"](event, f"你获得了 {format_amount(amount)}，当前持有：{format_amount(user['balance'])}。今日剩余领取次数：{remaining}。")
 
 
 COMMAND = {

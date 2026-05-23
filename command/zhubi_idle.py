@@ -208,6 +208,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 COMMAND = {
     "name": "/zhubi_idle",
     "usage": "/zhubi_idle [in/out <数量或nMAX+数字> | buy update quality|efficiency|speed | remake]",
-    "description": "猪币放置游戏：投入猪币每秒按idle存量产出到主钱包，基础0.000025/单位，可买quality(每级+7.5%倍率)/efficiency(每级+0.000025)/speed(×1.025)升级，主钱包或idle超过2147483647MAX时强制转生(每次转生×1.15)。",
+    "description": f"猪币放置游戏：投入猪币每秒按idle存量产出到主钱包，基础{common.IDLE_BASE_RATE}/单位，可买quality(每级+{common.QUALITY_STEP * 100}%倍率)/efficiency(每级+{common.IDLE_EFFICIENCY_STEP})/speed(×{common.SPEED_MULTIPLIER})升级，总和达到{common.MAX_UNIT:,}²时自动转生(每次转生×{1 + common.REMAKE_STEP})。",
     "handler": handler,
 }

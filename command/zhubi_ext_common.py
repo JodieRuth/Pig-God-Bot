@@ -315,3 +315,16 @@ def apply_idle_income(data: dict[str, Any], now: float | None = None) -> list[tu
             if group_id:
                 notifications.append((str(user_id), group_id, label, total))
     return notifications
+
+
+zhubi.MAX_UNIT = MAX_UNIT
+zhubi.truncate_decimal = truncate_decimal
+zhubi.format_amount = format_amount
+zhubi.format_number = format_number
+zhubi.parse_amount_value = parse_amount_value
+zhubi.parse_positive_amount = parse_positive_amount
+zhubi.parse_positive_int = parse_positive_int
+zhubi.balance_of = balance_of
+zhubi.change_balance = change_balance
+zhubi.total_holding = total_holding
+zhubi.spend_amount = spend_amount
