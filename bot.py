@@ -722,6 +722,8 @@ def plain_text(message: list[dict[str, Any]]) -> str:
             qq = data.get("qq")
             if qq:
                 parts.append(f" @{qq} ")
+        elif typ == "forward":
+            parts.append("[转发聊天记录]")
     return "".join(parts).strip()
 
 
@@ -744,6 +746,26 @@ def message_text(message: list[dict[str, Any]], group_id: int | None = None, str
             if not qq:
                 continue
             parts.append(" " if strip_bot and qq == BOT_QQ else f" {format_at_text(qq, group_id)} ")
+        elif typ == "forward":
+            parts.append("[转发聊天记录]")
+    return "".join(parts).strip()
+
+
+def forward_message_text(message: list[dict[str, Any]]) -> str:
+    parts = []
+    for seg in message:
+        typ = seg.get("type")
+        data = seg.get("data", {})
+        if typ == "text":
+            parts.append(data.get("text", ""))
+        elif typ == "image":
+            parts.append("[图片]")
+        elif typ == "at":
+            qq = str(data.get("qq") or "")
+            if qq:
+                parts.append(f"[@qq={qq}]")
+        elif typ == "forward":
+            parts.append("[转发聊天记录]")
     return "".join(parts).strip()
 
 
@@ -854,11 +876,15 @@ def recent_context(key: str) -> tuple[list[str], list[dict[str, Any]]]:
         has_images = bool(item.get("images"))
         message_id = item.get("message_id")
         prefix = f"消息ID {message_id} " if message_id is not None else ""
+        if has_images:
+            image_names = [Path(r["path"]).name for r in item.get("images", []) if isinstance(r, dict) and r.get("path")]
+            image_hint = " [" + ", ".join(str(n) for n in image_names) + "]" if image_names else " [图片]"
+        else:
+            image_hint = ""
         if has_text:
-            image_hint = " [图片]" if has_images else ""
             texts.append(f"{prefix}{recent_context_label(item)}: {item['text']}{image_hint}")
         elif has_images:
-            texts.append(f"{prefix}{recent_context_label(item)}: [图片]")
+            texts.append(f"{prefix}{recent_context_label(item)}:{image_hint}")
         for record in reversed(item.get("images", [])):
             if len(images) < MAX_CONTEXT_IMAGES and image_path(record).exists():
                 images.append(record)
@@ -1184,6 +1210,33 @@ async def parse_and_cache(event: dict[str, Any]) -> tuple[str, list[dict[str, An
     return text, records
 
 
+async def fetch_forward_message_content(message_id: str) -> str:
+    try:
+        data = onebot_response_data(await onebot_post("get_forward_msg", {"message_id": message_id}))
+    except Exception as exc:
+        log(f"get_forward_msg failed for {message_id}: {exception_detail(exc)}")
+        return "[转发内容获取失败]"
+    if not isinstance(data, dict):
+        return "[转发内容获取失败]"
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return "[转发内容为空]"
+    parts: list[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        sender = msg.get("sender")
+        if isinstance(sender, dict):
+            nickname = str(sender.get("nickname") or sender.get("user_id") or "?")
+        else:
+            nickname = "?"
+        segs = msg.get("message") if isinstance(msg.get("message"), list) else []
+        text = forward_message_text(segs)
+        if text:
+            parts.append(f"{nickname}: {text}")
+    return "\n".join(parts) if parts else "[转发内容为空]"
+
+
 async def cache_replied_message_context(event: dict[str, Any], replied: dict[str, Any]) -> list[dict[str, Any]]:
     segments = message_segments(replied)
     if not segments:
@@ -1195,13 +1248,26 @@ async def cache_replied_message_context(event: dict[str, Any], replied: dict[str
     urls = image_urls(segments)
     records = await cache_image_urls(urls, sender_id, sender_name, replied.get("message_id"))
     cache_sender_images(scope_key(event), sender_id, records)
-    if text or records:
+    forward_content = ""
+    for seg in segments:
+        if seg.get("type") == "forward":
+            forward_id = str(seg.get("data", {}).get("id") or "")
+            if forward_id:
+                forward_content = await fetch_forward_message_content(forward_id)
+            break
+    if forward_content:
+        context_text = f"被回复的转发消息：\n{forward_content}"
+    elif text:
+        context_text = f"被回复消息：{text}"
+    else:
+        context_text = "被回复消息包含图片"
+    if context_text or records:
         contexts[scope_key(event)].append({
             "time": time.time(),
             "message_id": replied.get("message_id"),
             "user_id": sender_id,
             "sender_name": sender_name,
-            "text": f"被回复消息：{text}" if text else "被回复消息包含图片",
+            "text": context_text,
             "images": records,
             "is_bot": str(sender_id) == BOT_QQ,
         })
@@ -1416,9 +1482,10 @@ def format_admin_users() -> str:
 
 def select_system_prompt(user_id: int, scope_key: str) -> str:
     reload_runtime_files()
+    bot_info = f"当前Bot QQ: {BOT_QQ}，Bot名称: {BOT_NAME or '（未设置）'}"
     if is_admin_user(user_id):
-        return prompt_value("admin_system_prompt", scope_key).replace("{admin_users}", format_admin_users())
-    return prompt_value("system_prompt", scope_key)
+        return prompt_value("admin_system_prompt", scope_key).replace("{admin_users}", format_admin_users()) + "\n\n" + bot_info
+    return prompt_value("system_prompt", scope_key) + "\n\n" + bot_info
 
 
 def select_tools(user_id: int) -> list[dict[str, Any]]:
