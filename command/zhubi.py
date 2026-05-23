@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import importlib.util
@@ -11,6 +12,56 @@ from typing import Any
 DATA_DIR = Path(__file__).with_name("zhubi")
 DATA_FILE = DATA_DIR / "data.json"
 DAILY_LIMIT = 1
+MAX_UNIT = 2147483647
+DECIMAL_PRECISION = 5
+DECIMAL_FACTOR = 10 ** DECIMAL_PRECISION
+
+
+def truncate_decimal(value: float) -> float:
+    return math.floor(max(0.0, float(value)) * DECIMAL_FACTOR) / DECIMAL_FACTOR
+
+
+def format_number(value: int | float) -> str:
+    return f"{int(truncate_decimal(value)):,}"
+
+
+def format_amount(value: int | float) -> str:
+    amount = max(0.0, float(value))
+    max_count = int(amount // MAX_UNIT)
+    remainder = truncate_decimal(amount - max_count * MAX_UNIT)
+    remainder_text = format_number(remainder)
+    if max_count <= 0:
+        return remainder_text
+    return f"{max_count:,}MAX+{remainder_text}"
+
+
+def parse_amount_value(value: str) -> float | None:
+    text = value.strip().upper().replace(",", "")
+    if not text:
+        return None
+    if "MAX" in text:
+        left, sep, right = text.partition("MAX")
+        if not sep or not left:
+            return None
+        if right.startswith("+"):
+            right = right[1:]
+        elif right:
+            return None
+        try:
+            max_count = float(left)
+            coins = float(right) if right else 0.0
+        except ValueError:
+            return None
+        if max_count < 0 or coins < 0:
+            return None
+        return truncate_decimal(max_count * MAX_UNIT + coins)
+    try:
+        amount = float(text)
+    except ValueError:
+        return None
+    if amount < 0:
+        return None
+    return truncate_decimal(amount)
 
 
 def today_key() -> str:
