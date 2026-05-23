@@ -850,10 +850,15 @@ def recent_context(key: str) -> tuple[list[str], list[dict[str, Any]]]:
     for item in reversed(contexts[key]):
         if now - item["time"] > MAX_CONTEXT_AGE_SECONDS:
             continue
-        if item.get("text"):
-            message_id = item.get("message_id")
-            prefix = f"消息ID {message_id} " if message_id is not None else ""
-            texts.append(f"{prefix}{recent_context_label(item)}: {item['text']}")
+        has_text = bool(item.get("text"))
+        has_images = bool(item.get("images"))
+        message_id = item.get("message_id")
+        prefix = f"消息ID {message_id} " if message_id is not None else ""
+        if has_text:
+            image_hint = " [图片]" if has_images else ""
+            texts.append(f"{prefix}{recent_context_label(item)}: {item['text']}{image_hint}")
+        elif has_images:
+            texts.append(f"{prefix}{recent_context_label(item)}: [图片]")
         for record in reversed(item.get("images", [])):
             if len(images) < MAX_CONTEXT_IMAGES and image_path(record).exists():
                 images.append(record)
@@ -1324,7 +1329,7 @@ def visible_images_for_sender(key: str, sender_id: int) -> list[dict[str, Any]]:
     return list(reversed(images))
 
 
-def build_image_input_note(images: list[dict[str, Any]]) -> str:
+def build_image_context_note(images: list[dict[str, Any]]) -> str:
     if not images:
         return "当前没有可用图片。"
     lines = ["输入图片按消息/上下文时间顺序编号如下："]
@@ -1332,23 +1337,19 @@ def build_image_input_note(images: list[dict[str, Any]]) -> str:
         path = image_path(record)
         lines.append(f"图{index} = 第 {index} 张输入图片，文件名 {path.name}，发送者 {image_sender_label(record)}")
     lines.append("当用户提到图1、图2、第一张、第二张时，必须按这个编号理解；不要自行交换图片顺序。")
+    lines.append("默认规则：如果触发者本人没有明确要求引用别人发的图，优先只使用触发者本人发送的图片；只有在明确回复他人消息、点名使用他人图片、或用户强烈要求跨发送者编辑时，才可以使用其他人的图片。")
     lines.append("如果需要直接回复某一条上下文消息，可以调用 reply_to_context_message，并使用最近上下文里标注的消息ID。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
     lines.append("如果用户只是要求把你能看到的一张或多张输入图片直接发出来、转发出来、贴出来，或是需要你通过各种手段得到的图片，而不是生成或编辑图片，必须调用 send_visible_image，并传入是否回复、回复消息ID、文字和图片编号；多张图使用 image_indexes。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
-    lines.append("Pixiv 搜索候选拼图是工具中间产物，只能给 LLM 内部挑选候选使用；除非用户明确要求查看候选/拼图/列表，否则永远不要发送候选拼图，也不要让用户从候选编号中挑选。")
-    lines.append("Pixiv tag 搜索无结果、结果明显不相关、或不确定实际 tag 名时，必须尝试 pixiv_search_title 用标题/说明关键词搜索，并从候选摘要 tags 反查真实 Pixiv tag；普通搜图请求仍需自行选候选。")
-    lines.append("Pixiv 搜索工具返回的候选拼图编号不是这里的图1/图2编号；普通搜图请求必须由你自行根据拼图选择候选，然后调用 pixiv_select_result 下载真实原图，再发送或使用 pixiv_select_result 返回的新 bot 图片编号。")
-    lines.append("强制工具规则：只要用户问题涉及任何图片中的人物是谁、角色名、出处、作品来源、像谁、叫什么、人物身份判断，必须优先调用 animetrace_character 工具并传入对应图片编号；不得仅根据上下文、文件名、画风、模型视觉能力或聊天历史猜测后直接回答。")
     return "\n".join(lines)
 
 
 def build_openai_messages(prompt: str, context_texts: list[str], context_notes: str, images: list[dict[str, Any]], trigger_sender_id: int, system_prompt: str) -> list[dict[str, Any]]:
     context = "\n".join(context_texts[-MAX_CONTEXT_MESSAGES:])
-    image_note = build_image_input_note(images)
-    policy_note = prompt_image_source_note(images)
+    image_note = build_image_context_note(images)
     if context:
-        user_text = f"最近群聊上下文：\n{context}\n\n{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n{policy_note}\n\n{image_note}\n\n当前请求：\n{prompt}"
+        user_text = f"最近群聊上下文：\n{context}\n\n{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}\n\n当前请求：\n{prompt}"
     else:
-        user_text = f"{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n{policy_note}\n\n{image_note}\n\n当前请求：\n{prompt}"
+        user_text = f"{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}\n\n当前请求：\n{prompt}"
     content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
     for record in images[:MAX_CONTEXT_IMAGES]:
         content.append({"type": "image_url", "image_url": {"url": image_data_url(image_path(record))}})
@@ -1359,8 +1360,8 @@ def build_openai_messages(prompt: str, context_texts: list[str], context_notes: 
 
 
 def build_updated_tool_image_content(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    image_note = build_image_input_note(images)
-    text = "工具刚刚更新了当前 LLM 图片上下文。请查看下面重新提供的图片。若其中包含 Pixiv 候选拼图，它只是内部挑选候选用的中间产物：除非用户明确要求查看候选/拼图/列表，否则不得发送候选拼图，也不得让用户从候选编号中选择；普通搜图请求应先调用 pixiv_select_result 下载真实原图。\n\n" + image_note
+    image_note = build_image_context_note(images)
+    text = "工具刚刚更新了当前 LLM 图片上下文。请查看下面重新提供的图片。\n\n" + image_note
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     for record in images[:MAX_CONTEXT_IMAGES]:
         content.append({"type": "image_url", "image_url": {"url": image_data_url(image_path(record))}})
@@ -1376,22 +1377,6 @@ def build_context_message_note(records: list[dict[str, Any]]) -> str:
         label = item.get("label") or ""
         text = item.get("text") or ""
         lines.append(f"message_id={message_id} | {label} | {text}")
-    return "\n".join(lines)
-
-
-def prompt_image_source_note(images: list[dict[str, Any]]) -> str:
-    if not images:
-        return ""
-    lines = ["可用图片及发送者如下："]
-    for index, record in enumerate(images[:MAX_CONTEXT_IMAGES], start=1):
-        lines.append(f"图{index}：{image_sender_label(record)}")
-    lines.append("默认规则：如果触发者本人没有明确要求引用别人发的图，优先只使用触发者本人发送的图片；只有在明确回复他人消息、点名使用他人图片、或用户强烈要求跨发送者编辑时，才可以使用其他人的图片。")
-    lines.append("如果用户要求你直接回复某个人或某条消息，优先调用 reply_to_context_message，并使用上下文中标注的消息ID。工具成功后不得再输出普通文本。")
-    lines.append("如果用户要求直接发送、转发、贴出一张或多张可见输入图片，调用 send_visible_image 发送对应图片编号；多张图使用 image_indexes，需要贴到某条消息下方时设置 reply 和 message_id。工具成功后不得再输出普通文本。")
-    lines.append("Pixiv 候选拼图是工具中间产物，只能用于你内部挑选候选；除非用户明确要求查看候选/拼图/列表，否则严禁调用 send_visible_image 发送候选拼图，严禁让用户从候选编号中选择。")
-    lines.append("Pixiv tag 搜索无结果、结果明显不相关、或不确定实际 tag 名时，必须尝试 pixiv_search_title 用标题/说明关键词搜索，并从候选 tags 反查真实 Pixiv tag。")
-    lines.append("如果可见图片是 Pixiv 候选拼图，拼图里的编号不是 bot 图片编号；普通搜图请求必须先调用 pixiv_select_result 下载对应候选真实大图并追加元数据上下文，再使用返回的新 bot 图片编号。")
-    lines.append("人物识别强制规则：涉及图中角色/人物身份、出处、名字、像谁等问题时，必须先调用 animetrace_character，不能先自行推断。")
     return "\n".join(lines)
 
 
@@ -1451,7 +1436,8 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         image_note = f"，并带有 {len(images)} 张上下文图片" if images else ""
         return {"type": "text", "text": f"已收到：{prompt}{image_note}\n\n请在 .env 里配置 OpenAI 兼容的 LLM_API_URL 后接入真实文本/多模态 API。"}
 
-    messages = build_openai_messages(prompt, context_texts, build_context_message_note(context_message_records(scope_key(event))), images, trigger_sender_id, system_prompt)
+    context_msg_records = context_message_records(scope_key(event))
+    messages = build_openai_messages(prompt, context_texts, build_context_message_note(context_msg_records), images, trigger_sender_id, system_prompt)
 
     headers = {"Authorization": f"Bearer {llm_key}"} if llm_key else {}
     tool_runtime = {
@@ -1459,7 +1445,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         "prompt": prompt,
         "context_texts": context_texts,
         "images": images,
-        "context_messages": context_message_records(scope_key(event)),
+        "context_messages": context_msg_records,
         "trigger_sender_id": trigger_sender_id,
         "system_prompt": system_prompt,
     }
@@ -2001,13 +1987,14 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
             return target
 
 
-def select_llm_images(key: str, sender_id: int, current_images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def select_llm_images(key: str, sender_id: int, current_images: list[dict[str, Any]], recent_images: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     if current_images:
         return current_images[:MAX_CONTEXT_IMAGES]
     sender_images = visible_images_for_sender(key, sender_id)
     if len(sender_images) >= MAX_CONTEXT_IMAGES:
         return sender_images[:MAX_CONTEXT_IMAGES]
-    _, recent_images = recent_context(key)
+    if recent_images is None:
+        _, recent_images = recent_context(key)
     merged: list[dict[str, Any]] = []
     for record in sender_images + recent_images:
         if record not in merged:
@@ -2940,7 +2927,7 @@ async def handle_event(event: dict[str, Any]) -> None:
         if not prompt:
             log("No prompt after normalization")
             return
-        images = select_llm_images(key, int(event.get("user_id", 0)), current_images) if allow_photos else []
+        images = select_llm_images(key, int(event.get("user_id", 0)), current_images, recent_images) if allow_photos else []
         system_prompt = select_system_prompt(int(event.get("user_id", 0)), key)
         tools = select_tools(int(event.get("user_id", 0)))
         log(f"Context resolved: texts={len(context_texts)} recent_images={len(recent_images)} current_images={len(current_images)} selected_images={len(images)} selected_image_files={[image_path(record).name for record in images]} admin={is_admin_user(int(event.get('user_id', 0)))}")

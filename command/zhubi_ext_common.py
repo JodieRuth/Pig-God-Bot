@@ -15,23 +15,23 @@ spec.loader.exec_module(zhubi)
 
 MAX_UNIT = 2147483647
 CLEAR_THRESHOLD = MAX_UNIT * MAX_UNIT
-IDLE_BASE_RATE = 0.000025
-IDLE_EFFICIENCY_STEP = 0.000025
-QUALITY_STEP = 0.075
-SPEED_MULTIPLIER = 1.025
-REMAKE_STEP = 0.15
+IDLE_BASE_RATE = 0.000040
+IDLE_EFFICIENCY_STEP = 0.0000125
+QUALITY_STEP = 0.05
+SPEED_MULTIPLIER = 1.020
+REMAKE_STEP = 0.075
 DECIMAL_PRECISION = 5
 DECIMAL_FACTOR = 10 ** DECIMAL_PRECISION
 LEVEL_NAMES = ["ULV", "LV", "MV", "HV", "EV", "IV", "LuV", "ZPM", "UV", "UHV", "UEV", "UIV", "UMV", "UXV", "MAX"]
 UPGRADE_BASE_COSTS = {
-    "quality": 100000.0,
+    "quality": 250000.0,
     "efficiency": 1000000.0,
     "speed": float(MAX_UNIT),
 }
 UPGRADE_COST_GROWTH = {
-    "quality": 2.25,
-    "efficiency": 3.75,
-    "speed": 5.5,
+    "quality": 5.5,
+    "efficiency": 2.75,
+    "speed": 2.25,
 }
 MILESTONES = [
     (25565.0, "ULV"),
@@ -261,7 +261,7 @@ def remake_user(user: dict[str, Any], group_id: int | None = None) -> int:
 
 def enforce_auto_remake(user: dict[str, Any], group_id: int | None = None) -> bool:
     state = idle_state(user)
-    if balance_of(user) > CLEAR_THRESHOLD or idle_total_coins(state) > CLEAR_THRESHOLD:
+    if total_holding(user) >= CLEAR_THRESHOLD:
         remake_user(user, group_id)
         return True
     return False
