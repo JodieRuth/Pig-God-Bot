@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import math
 import time
@@ -15,7 +16,7 @@ common = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(common)
 zhubi = common.zhubi
 
-HOURLY_LIMIT = 3
+HOURLY_LIMIT = 25
 HOURLY_WINDOW_SECONDS = 1800
 hourly_usage: dict[str, deque[float]] = defaultdict(deque)
 
@@ -175,34 +176,60 @@ async def handle_remake(event: dict[str, Any], ctx: dict[str, Any]) -> None:
 
 
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
-    allowed, value = check_hourly_limit(event, ctx)
-    if not allowed:
-        minutes, seconds = divmod(value, 60)
-        await ctx["reply"](event, f"/zhubi_idle 每人每小时只能使用 {HOURLY_LIMIT} 次，请 {minutes}分{seconds}秒 后再试。")
-        return
-    parts = arg.split()
-    if not parts:
-        data = zhubi.load_data()
-        notifications = common.apply_idle_income(data)
-        user = zhubi.user_data(data, str(event.get("user_id", 0)))
-        state = common.idle_state(user)
-        if event.get("message_type") == "group":
-            state["group_id"] = int(event.get("group_id", 0))
-        zhubi.save_data(data)
-        await notify_milestones(event, ctx, notifications)
-        await ctx["reply"](event, idle_summary(state, common.balance_of(user)))
-        return
-    action = parts[0].lower()
-    if action in {"in", "out"}:
-        await handle_move(event, parts, ctx)
-        return
-    if action == "buy":
-        await handle_buy(event, parts, ctx)
-        return
-    if action == "remake" and len(parts) == 1:
-        await handle_remake(event, ctx)
-        return
-    await ctx["reply"](event, "用法：/zhubi_idle [in/out 数量 | buy update quality|efficiency|speed | remake]")
+    _orig_reply = ctx["reply"]
+
+    async def _reply(event_: dict[str, Any], message: str | list[dict[str, Any]]) -> None:
+        if isinstance(message, str):
+            msg = [{"type": "text", "data": {"text": message}}]
+        else:
+            msg = message
+        if event_.get("message_type") == "group":
+            resp = await ctx["onebot_post"]("send_group_msg", {"group_id": event_["group_id"], "message": msg})
+        else:
+            resp = await ctx["onebot_post"]("send_private_msg", {"user_id": event_["user_id"], "message": msg})
+        data = resp.get("data") if isinstance(resp, dict) else resp if isinstance(resp, dict) else {}
+        msg_id = data.get("message_id")
+        if msg_id:
+            async def _recall() -> None:
+                await asyncio.sleep(60)
+                try:
+                    await ctx["onebot_post"]("delete_msg", {"message_id": msg_id})
+                except Exception:
+                    pass
+            asyncio.ensure_future(_recall())
+
+    ctx["reply"] = _reply
+    try:
+        allowed, value = check_hourly_limit(event, ctx)
+        if not allowed:
+            minutes, seconds = divmod(value, 60)
+            await ctx["reply"](event, f"/zhubi_idle 每人每小时只能使用 {HOURLY_LIMIT} 次，请 {minutes}分{seconds}秒 后再试。")
+            return
+        parts = arg.split()
+        if not parts:
+            data = zhubi.load_data()
+            notifications = common.apply_idle_income(data)
+            user = zhubi.user_data(data, str(event.get("user_id", 0)))
+            state = common.idle_state(user)
+            if event.get("message_type") == "group":
+                state["group_id"] = int(event.get("group_id", 0))
+            zhubi.save_data(data)
+            await notify_milestones(event, ctx, notifications)
+            await ctx["reply"](event, idle_summary(state, common.balance_of(user)))
+            return
+        action = parts[0].lower()
+        if action in {"in", "out"}:
+            await handle_move(event, parts, ctx)
+            return
+        if action == "buy":
+            await handle_buy(event, parts, ctx)
+            return
+        if action == "remake" and len(parts) == 1:
+            await handle_remake(event, ctx)
+            return
+        await ctx["reply"](event, "用法：/zhubi_idle [in/out 数量 | buy update quality|efficiency|speed | remake]")
+    finally:
+        ctx["reply"] = _orig_reply
 
 
 COMMAND = {

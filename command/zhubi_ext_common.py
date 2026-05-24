@@ -15,22 +15,22 @@ spec.loader.exec_module(zhubi)
 
 MAX_UNIT = 2147483647
 CLEAR_THRESHOLD = MAX_UNIT * MAX_UNIT
-IDLE_BASE_RATE = 0.000040
-IDLE_EFFICIENCY_STEP = 0.0000125
-QUALITY_STEP = 0.05
+IDLE_BASE_RATE = 0.000005
+IDLE_EFFICIENCY_STEP = 0.0000075
+QUALITY_STEP = 0.0075
 SPEED_MULTIPLIER = 1.020
 REMAKE_STEP = 0.075
 DECIMAL_PRECISION = 5
 DECIMAL_FACTOR = 10 ** DECIMAL_PRECISION
 LEVEL_NAMES = ["ULV", "LV", "MV", "HV", "EV", "IV", "LuV", "ZPM", "UV", "UHV", "UEV", "UIV", "UMV", "UXV", "MAX"]
 UPGRADE_BASE_COSTS = {
-    "quality": 250000.0,
-    "efficiency": 1000000.0,
-    "speed": float(MAX_UNIT),
+    "quality": 12500.0,
+    "efficiency": 100000.0,
+    "speed": 500000,
 }
 UPGRADE_COST_GROWTH = {
-    "quality": 5.5,
-    "efficiency": 2.75,
+    "quality": 1.25,
+    "efficiency": 2.45,
     "speed": 2.25,
 }
 MILESTONES = [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -267,16 +268,33 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     user_id = str(event.get("user_id", 0))
     user = user_data(data, user_id)
     if arg.strip().lower() == "show":
+        async def _show_recall_reply(message: str) -> None:
+            msg = [{"type": "text", "data": {"text": message}}]
+            if event.get("message_type") == "group":
+                resp = await ctx["onebot_post"]("send_group_msg", {"group_id": event["group_id"], "message": msg})
+            else:
+                resp = await ctx["onebot_post"]("send_private_msg", {"user_id": event["user_id"], "message": msg})
+            data_resp = resp.get("data") if isinstance(resp, dict) else resp if isinstance(resp, dict) else {}
+            msg_id = data_resp.get("message_id")
+            if msg_id:
+                async def _recall() -> None:
+                    await asyncio.sleep(60)
+                    try:
+                        await ctx["onebot_post"]("delete_msg", {"message_id": msg_id})
+                    except Exception:
+                        pass
+                asyncio.ensure_future(_recall())
+
         COMMON_MODULE = Path(__file__).with_name("zhubi_ext_common.py")
         spec = importlib.util.spec_from_file_location("local_onebot_zhubi_ext_common_show", COMMON_MODULE)
         if spec is None or spec.loader is None:
-            await ctx["reply"](event, "无法加载猪币扩展模块。")
+            await _show_recall_reply("无法加载猪币扩展模块。")
             return
         common = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(common)
         common.apply_idle_income(data)
         save_data(data)
-        await ctx["reply"](event, idle_summary(user, common))
+        await _show_recall_reply(idle_summary(user, common))
         return
     is_admin = ctx["is_admin_event"](event)
     if not is_admin and float(user.get("daily_claims", 0)) >= DAILY_LIMIT:
