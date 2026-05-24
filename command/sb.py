@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -71,10 +72,33 @@ def load_items() -> tuple[list[dict[str, Any]], int]:
     return items, next_id
 
 
+def parse_id(text: str) -> int | None:
+    match = re.fullmatch(r"#?(\d+)", text.strip())
+    return int(match.group(1)) if match else None
+
+
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     items, _ = load_items()
     if not items:
         await ctx["reply"](event, "还没有保存任何内容，使用 /sb_s <内容> 添加。")
+        return
+    query = arg.strip()
+    if query:
+        target_id = parse_id(query)
+        if target_id is not None:
+            for item in items:
+                if int(item.get("id", 0)) == target_id:
+                    await ctx["reply"](event, f"#{item['id']} {item['text']}")
+                    return
+            await ctx["reply"](event, f"不存在编号 #{target_id}。")
+            return
+        lowered_query = query.lower()
+        matched = [item for item in items if lowered_query in str(item.get("text", "")).lower()]
+        if not matched:
+            await ctx["reply"](event, f"没有找到包含“{query}”的内容。")
+            return
+        item = random.choice(matched)
+        await ctx["reply"](event, f"#{item['id']} {item['text']}")
         return
     item = random.choice(items)
     await ctx["reply"](event, f"#{item['id']} {item['text']}")
@@ -82,7 +106,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
 COMMAND = {
     "name": "/sb",
-    "usage": "/sb",
-    "description": "从 /sb_s 保存的内容中随机抽取一条发送。",
+    "usage": "/sb [#编号|关键词]",
+    "description": "从 /sb_s 保存的内容中随机抽取一条；可指定编号，或按关键词匹配后随机抽取。",
     "handler": handler,
 }
