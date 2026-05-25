@@ -1534,10 +1534,11 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
+            "parallel_tool_calls": False,
         }
         if use_stream:
             payload["stream"] = True
-        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto", "stream": use_stream}, "headers": headers})
+        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto", "parallel_tool_calls": False, "stream": use_stream}, "headers": headers})
         await LLM_RPM_LIMITER.acquire()
         message: dict[str, Any]
         tool_calls: list[dict[str, Any]] = []
@@ -1600,8 +1601,15 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             tool_calls = message.get("tool_calls") or []
             log(f"LLM non-streaming reply: content_len={len(str(message.get('content') or ''))} tool_calls={len(tool_calls)}")
         if tool_calls:
+            if len(tool_calls) > 1:
+                log(f"LLM returned {len(tool_calls)} tool calls; keeping only the first one to preserve strict tool_result ordering")
+                tool_calls = tool_calls[:1]
+            for tool_call in tool_calls:
+                if isinstance(tool_call, dict) and not tool_call.get("id"):
+                    tool_call["id"] = f"call_{uuid.uuid4().hex}"
             log_json("LLM tool calls", tool_calls)
-            assistant_message = {"role": "assistant", "content": message.get("content") or "", "tool_calls": tool_calls}
+            assistant_content = message.get("content")
+            assistant_message = {"role": "assistant", "content": assistant_content if isinstance(assistant_content, str) else "", "tool_calls": tool_calls}
             if "reasoning_content" in message:
                 assistant_message["reasoning_content"] = message.get("reasoning_content") or ""
             messages.append(assistant_message)
