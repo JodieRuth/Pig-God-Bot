@@ -300,7 +300,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if not is_admin and float(user.get("daily_claims", 0)) >= DAILY_LIMIT:
         await ctx["reply"](event, f"你今天已经领过 {DAILY_LIMIT} 次猪币了，当前余额：{format_amount(user['balance'])}。")
         return
-    amount = random.randint(1, 3000)
+    amount = random.randint(1, 250000)
     user["balance"] = truncate_decimal(float(user.get("balance", 0.0)) + float(amount))
     user["daily_claims"] = int(user.get("daily_claims", 0)) + 1
     user["daily_claimed"] = int(user.get("daily_claimed", 0)) + amount
@@ -317,6 +317,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 COMMAND = {
     "name": "/zhubi",
     "usage": "/zhubi [show | add <QQ号> <猪币数量或nMAX+数字>]",
-    "description": "每日一次随机1~3000猪币；show查看钱包与idle参数；add仅所有者可用。",
+    "description": "每日一次随机1~250000猪币；show查看钱包与idle参数；add仅所有者可用。",
     "handler": handler,
 }
