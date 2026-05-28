@@ -257,6 +257,13 @@ def numbered_api_configs(prefix: str) -> list[dict[str, str]]:
     return configs
 
 
+def default_retry_count() -> int:
+    try:
+        return max(0, int(os.getenv("LLM_RETRY_COUNT", "3")))
+    except ValueError:
+        return 3
+
+
 def env_active_runtime_state() -> dict[str, Any]:
     return {
         "llm": {"api_index": os.getenv("ACTIVE_LLM_API_INDEX", "0"), "model": os.getenv("ACTIVE_LLM_MODEL", OPENAI_MODEL)},
@@ -264,6 +271,7 @@ def env_active_runtime_state() -> dict[str, Any]:
         "prompt": {"id": os.getenv("ACTIVE_PROMPT_ID", "1")},
         "photo": {"enabled": os.getenv("ACTIVE_PHOTO_ENABLED", "1") != "0"},
         "stream": {"enabled": os.getenv("ACTIVE_STREAM_ENABLED", "1") != "0"},
+        "retry": {"count": default_retry_count()},
     }
 
 
@@ -324,6 +332,8 @@ def apply_env_active_state_to_runtime() -> None:
         runtime_state[kind]["model"] = str(env_state[kind]["model"])
     runtime_state.setdefault("prompt", {})["id"] = str(env_state["prompt"]["id"])
     runtime_state.setdefault("photo", {})["enabled"] = bool(env_state["photo"]["enabled"])
+    runtime_state.setdefault("stream", {})["enabled"] = bool(env_state["stream"]["enabled"])
+    runtime_state.setdefault("retry", {})["count"] = int(env_state["retry"]["count"])
     save_runtime_state(runtime_state)
 
 
@@ -544,6 +554,22 @@ def set_stream_enabled(enabled: bool) -> bool:
     return True
 
 
+def retry_count() -> int:
+    retry_state = runtime_state.get("retry", {})
+    try:
+        return max(0, int(retry_state.get("count", 3))) if isinstance(retry_state, dict) else 3
+    except (TypeError, ValueError):
+        return 3
+
+
+def set_retry_count(count: int) -> bool:
+    value = max(0, int(count))
+    runtime_state.setdefault("retry", {})["count"] = value
+    save_runtime_state(runtime_state)
+    set_env_value("LLM_RETRY_COUNT", str(value))
+    return True
+
+
 LLM_API_URL = active_api_config("llm")["url"]
 LLM_API_KEY = active_api_config("llm")["key"]
 IMAGE_API_URL = active_api_config("image")["url"]
@@ -579,6 +605,8 @@ IMAGE_SENDER_CACHE_TTL_SECONDS = 60 * 60
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 LLM_MAX_RPM = int(os.getenv("LLM_MAX_RPM", "30"))
 LLM_RPM_LIMITER = RpmLimiter(LLM_MAX_RPM)
+IMAGE_API_RETRY_COUNT = int(os.getenv("IMAGE_API_RETRY_COUNT", "3"))
+IMAGE_API_RETRY_DELAY_SECONDS = int(os.getenv("IMAGE_API_RETRY_DELAY_SECONDS", "12"))
 LLM_DISABLED_MODELS: set[str] = {m.strip().lower() for m in os.getenv("LLM_DISABLED_MODELS", "").split(",") if m.strip()}
 IMAGE_DISABLED_MODELS: set[str] = {m.strip().lower() for m in os.getenv("IMAGE_DISABLED_MODELS", "").split(",") if m.strip()}
 DEBUG_LOG = os.getenv("DEBUG_LOG", "1") != "0"
@@ -1539,57 +1567,57 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         if use_stream:
             payload["stream"] = True
         log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto", "parallel_tool_calls": False, "stream": use_stream}, "headers": headers})
-        await LLM_RPM_LIMITER.acquire()
-        message: dict[str, Any]
-        tool_calls: list[dict[str, Any]] = []
-        if use_stream:
-            content_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            tool_call_chunks: dict[int, dict[str, Any]] = {}
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.post(llm_url, json=payload, timeout=600) as resp:
-                    if resp.status >= 400:
-                        text = await resp.text()
-                        log(f"LLM response status={resp.status} body={text[:1000]}")
-                        raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
-                    async for data_text in iter_sse_data(resp):
-                        if not data_text or data_text == "[DONE]":
-                            continue
-                        try:
-                            chunk = json.loads(data_text)
-                        except json.JSONDecodeError:
-                            log(f"LLM SSE unparseable chunk: {sanitize_error_detail(data_text, 300)}")
-                            continue
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = (choices[0] or {}).get("delta") or {}
-                        if "content" in delta and delta["content"]:
-                            content_parts.append(str(delta["content"]))
-                        if "reasoning_content" in delta and delta["reasoning_content"]:
-                            reasoning_parts.append(str(delta["reasoning_content"]))
-                        for tc in delta.get("tool_calls") or []:
-                            idx = tc.get("index", 0)
-                            if idx not in tool_call_chunks:
-                                tool_call_chunks[idx] = {"id": tc.get("id") or "", "function": {"name": "", "arguments": ""}}
-                            entry = tool_call_chunks[idx]
-                            if tc.get("id"):
-                                entry["id"] = tc["id"]
-                            fn = tc.get("function") or {}
-                            if fn.get("name"):
-                                entry["function"]["name"] += fn["name"]
-                            if fn.get("arguments"):
-                                entry["function"]["arguments"] += fn["arguments"]
-            content = "".join(content_parts)
-            reasoning_content = "".join(reasoning_parts)
-            tool_calls = [tool_call_chunks[i] for i in sorted(tool_call_chunks.keys())]
-            message = {"role": "assistant", "content": content}
-            if reasoning_content:
-                message["reasoning_content"] = reasoning_content
-            if tool_calls:
-                message["tool_calls"] = tool_calls
-            log(f"LLM streaming reply: content_len={len(content)} tool_calls={len(tool_calls)} reasoning_len={len(reasoning_content)}")
-        else:
+
+        async def request_chat_once() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            await LLM_RPM_LIMITER.acquire()
+            if use_stream:
+                content_parts: list[str] = []
+                reasoning_parts: list[str] = []
+                tool_call_chunks: dict[int, dict[str, Any]] = {}
+                async with aiohttp.ClientSession(headers=headers) as session:
+                    async with session.post(llm_url, json=payload, timeout=600) as resp:
+                        if resp.status >= 400:
+                            text = await resp.text()
+                            log(f"LLM response status={resp.status} body={text[:1000]}")
+                            raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
+                        async for data_text in iter_sse_data(resp):
+                            if not data_text or data_text == "[DONE]":
+                                continue
+                            try:
+                                chunk = json.loads(data_text)
+                            except json.JSONDecodeError:
+                                log(f"LLM SSE unparseable chunk: {sanitize_error_detail(data_text, 300)}")
+                                continue
+                            choices = chunk.get("choices") or []
+                            if not choices:
+                                continue
+                            delta = (choices[0] or {}).get("delta") or {}
+                            if "content" in delta and delta["content"]:
+                                content_parts.append(str(delta["content"]))
+                            if "reasoning_content" in delta and delta["reasoning_content"]:
+                                reasoning_parts.append(str(delta["reasoning_content"]))
+                            for tc in delta.get("tool_calls") or []:
+                                idx = tc.get("index", 0)
+                                if idx not in tool_call_chunks:
+                                    tool_call_chunks[idx] = {"id": tc.get("id") or "", "function": {"name": "", "arguments": ""}}
+                                entry = tool_call_chunks[idx]
+                                if tc.get("id"):
+                                    entry["id"] = tc["id"]
+                                fn = tc.get("function") or {}
+                                if fn.get("name"):
+                                    entry["function"]["name"] += fn["name"]
+                                if fn.get("arguments"):
+                                    entry["function"]["arguments"] += fn["arguments"]
+                content = "".join(content_parts)
+                reasoning_content = "".join(reasoning_parts)
+                streamed_tool_calls = [tool_call_chunks[i] for i in sorted(tool_call_chunks.keys())]
+                streamed_message: dict[str, Any] = {"role": "assistant", "content": content}
+                if reasoning_content:
+                    streamed_message["reasoning_content"] = reasoning_content
+                if streamed_tool_calls:
+                    streamed_message["tool_calls"] = streamed_tool_calls
+                log(f"LLM streaming reply: content_len={len(content)} tool_calls={len(streamed_tool_calls)} reasoning_len={len(reasoning_content)}")
+                return streamed_message, streamed_tool_calls
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.post(llm_url, json=payload, timeout=600) as resp:
                     text = await resp.text()
@@ -1597,9 +1625,21 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             if resp.status >= 400:
                 raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
             data = json.loads(text)
-            message = data["choices"][0]["message"]
-            tool_calls = message.get("tool_calls") or []
-            log(f"LLM non-streaming reply: content_len={len(str(message.get('content') or ''))} tool_calls={len(tool_calls)}")
+            non_stream_message = data["choices"][0]["message"]
+            non_stream_tool_calls = non_stream_message.get("tool_calls") or []
+            log(f"LLM non-streaming reply: content_len={len(str(non_stream_message.get('content') or ''))} tool_calls={len(non_stream_tool_calls)}")
+            return non_stream_message, non_stream_tool_calls
+
+        max_retries = retry_count()
+        for request_attempt in range(max_retries + 1):
+            try:
+                message, tool_calls = await request_chat_once()
+                break
+            except Exception as exc:
+                if request_attempt >= max_retries:
+                    raise
+                log(f"LLM request failed, retrying in 12s ({request_attempt + 1}/{max_retries}): {exception_detail(exc)}")
+                await asyncio.sleep(12)
         if tool_calls:
             if len(tool_calls) > 1:
                 log(f"LLM returned {len(tool_calls)} tool calls; keeping only the first one to preserve strict tool_result ordering")
@@ -1797,13 +1837,28 @@ def is_data_image_url(value: str) -> bool:
 
 
 async def download_generated_image_url(url: str, target: Path) -> None:
-    async with aiohttp.ClientSession(trust_env=True) as session:
-        async with session.get(url, timeout=60 * 10) as resp:
-            body = await resp.read()
-            if resp.status >= 400:
-                detail = sanitize_error_detail(body.decode("utf-8", errors="replace"), 500)
-                raise RuntimeError(f"图片 URL 下载失败 HTTP {resp.status}: {detail}")
-            target.write_bytes(body)
+    last_error: BaseException | None = None
+    for attempt in range(IMAGE_API_RETRY_COUNT + 1):
+        try:
+            connector = aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True)
+            timeout = aiohttp.ClientTimeout(total=60 * 30, sock_connect=60, sock_read=60 * 30)
+            async with aiohttp.ClientSession(connector=connector, trust_env=True, timeout=timeout) as session:
+                async with session.get(url, headers={"Connection": "close"}) as resp:
+                    body = await resp.read()
+                    if resp.status >= 400:
+                        detail = sanitize_error_detail(body.decode("utf-8", errors="replace"), 500)
+                        raise RuntimeError(f"图片 URL 下载失败 HTTP {resp.status}: {detail}")
+                    target.write_bytes(body)
+                    return
+        except Exception as exc:
+            last_error = exc
+            target.unlink(missing_ok=True)
+            if attempt >= IMAGE_API_RETRY_COUNT:
+                break
+            log(f"Generated image URL download failed, retrying in {IMAGE_API_RETRY_DELAY_SECONDS}s ({attempt + 1}/{IMAGE_API_RETRY_COUNT}): {exception_detail(exc)}")
+            await asyncio.sleep(IMAGE_API_RETRY_DELAY_SECONDS)
+    if last_error is not None:
+        raise last_error
 
 
 def write_image_result_to_file(image_result: str, target: Path) -> None:
@@ -2103,11 +2158,29 @@ def image_exception_detail(exc: BaseException) -> str:
     return detail
 
 
+def is_retryable_image_exception(exc: BaseException) -> bool:
+    if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
+        return True
+    detail = image_exception_detail(exc).lower()
+    return any(item in detail for item in ("http 500", "http 502", "http 503", "http 504", "timeout", "timed out", "ssl", "connection reset", "connection aborted", "decryption_failed_or_bad_record_mac"))
+
+
 async def run_image_job(event: dict[str, Any], job_id: str, prompt: str, context_texts: list[str], images: list[dict[str, Any]]) -> None:
     start = time.monotonic()
     log(f"Image job started: {job_id} prompt={prompt!r} images={[image_path(record).name for record in images]}")
     try:
-        output = await call_image_api(prompt, context_texts, images)
+        output: Path | None = None
+        for attempt in range(IMAGE_API_RETRY_COUNT + 1):
+            try:
+                output = await call_image_api(prompt, context_texts, images)
+                break
+            except Exception as exc:
+                if attempt >= IMAGE_API_RETRY_COUNT or not is_retryable_image_exception(exc):
+                    raise
+                log(f"Image job transient failure: {job_id}, retrying in {IMAGE_API_RETRY_DELAY_SECONDS}s ({attempt + 1}/{IMAGE_API_RETRY_COUNT}): {exception_detail(exc)}")
+                await asyncio.sleep(IMAGE_API_RETRY_DELAY_SECONDS)
+        if output is None:
+            raise RuntimeError("生图任务没有生成输出文件")
         elapsed = format_elapsed(time.monotonic() - start)
         log(f"Image job finished: {job_id} elapsed={elapsed} output={output}")
         await reply(event, [
@@ -2399,6 +2472,8 @@ def command_context() -> dict[str, Any]:
         "photo_enabled": photo_enabled,
         "set_stream_enabled": set_stream_enabled,
         "stream_enabled": stream_enabled,
+        "set_retry_count": set_retry_count,
+        "retry_count": retry_count,
         "admin_users": ADMIN_USERS,
         "bot_qq": BOT_QQ,
         "clear_contexts": clear_all_contexts,
@@ -2417,6 +2492,7 @@ def command_context() -> dict[str, Any]:
         "max_context_messages": MAX_CONTEXT_MESSAGES,
         "image_path": image_path,
         "image_sender_label": image_sender_label,
+        "visible_images_for_sender": visible_images_for_sender,
         "download_image": download_image,
         "qq_avatar_url": qq_avatar_url,
         "download_qq_avatar": download_qq_avatar,

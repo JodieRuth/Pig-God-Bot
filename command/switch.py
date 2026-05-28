@@ -11,7 +11,7 @@ def parse_args(arg: str) -> tuple[str, str] | None:
         return None
     kind = parts[0].lower()
     value = parts[1].strip()
-    if kind not in {"llm", "image", "prompt", "photo", "stream"} or not value:
+    if kind not in {"llm", "image", "prompt", "photo", "stream", "retry"} or not value:
         return None
     return kind, value
 
@@ -75,7 +75,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         return
     parsed = parse_args(arg)
     if parsed is None:
-        await ctx["reply"](event, "用法：/switch llm <modelname[#N]>、/switch image <modelname[#N]>、/switch prompt <编号> 或 /switch photo true|false")
+        await ctx["reply"](event, "用法：/switch llm <modelname[#N]>、/switch image <modelname[#N]>、/switch prompt <编号>、/switch photo true|false、/switch stream true|false 或 /switch retry <次数>")
         return
     kind, value = parsed
     if kind == "photo":
@@ -96,6 +96,18 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         enabled = normalized in {"true", "1", "on", "yes"}
         ctx["set_stream_enabled"](enabled)
         await ctx["reply"](event, f"已{'开启' if enabled else '关闭'}LLM 流式传输。")
+        return
+    if kind == "retry":
+        try:
+            count = int(value)
+        except ValueError:
+            await ctx["reply"](event, "用法：/switch retry <非负整数>")
+            return
+        if count < 0:
+            await ctx["reply"](event, "retry_count 必须是非负整数。")
+            return
+        ctx["set_retry_count"](count)
+        await ctx["reply"](event, f"已设置 LLM 上游错误重试次数：{count}。每次重试间隔 12 秒。")
         return
     if kind == "prompt":
         prompt_configs = ctx["get_prompt_configs"]()
@@ -183,7 +195,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
 COMMAND = {
     "name": "/switch",
-    "usage": "/switch llm/image <modelname[#N]>、/switch prompt <编号>、/switch photo true|false 或 /switch stream true|false",
-    "description": "仅所有者可用：切换当前使用的 LLM、图片 API、prompt、图片输入开关或流式传输开关。",
+    "usage": "/switch llm/image <modelname[#N]>、/switch prompt <编号>、/switch photo true|false、/switch stream true|false 或 /switch retry <次数>",
+    "description": "仅所有者可用：切换当前使用的 LLM、图片 API、prompt、图片输入开关、流式传输开关或上游错误重试次数。",
     "handler": handler,
 }

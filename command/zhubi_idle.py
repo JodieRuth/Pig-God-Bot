@@ -129,35 +129,57 @@ async def handle_move(event: dict[str, Any], parts: list[str], ctx: dict[str, An
 
 
 async def handle_buy(event: dict[str, Any], parts: list[str], ctx: dict[str, Any]) -> None:
-    if len(parts) != 3 or parts[1].lower() != "update" or parts[2].lower() not in common.UPGRADE_BASE_COSTS:
-        await ctx["reply"](event, "用法：/zhubi_idle buy update quality|efficiency|speed")
+    if len(parts) not in {3, 4} or parts[1].lower() != "update" or parts[2].lower() not in common.UPGRADE_BASE_COSTS:
+        await ctx["reply"](event, "用法：/zhubi_idle buy update quality|efficiency|speed [购买级数]")
         return
     kind = parts[2].lower()
+    buy_count = 1
+    if len(parts) == 4:
+        try:
+            buy_count = int(parts[3])
+        except ValueError:
+            await ctx["reply"](event, "购买级数必须是正整数。")
+            return
+        if buy_count <= 0:
+            await ctx["reply"](event, "购买级数必须是正整数。")
+            return
     data = zhubi.load_data()
     notifications = common.apply_idle_income(data)
     user_id = str(event.get("user_id", 0))
     user = zhubi.user_data(data, user_id)
     state = common.idle_state(user)
     level = int(state.get(kind, 0))
-    cost = common.upgrade_cost(kind, level)
-    holding = common.total_holding(user)
-    if holding < cost:
+    purchased = 0
+    total_cost = 0.0
+    total_idle_spent = 0.0
+    next_cost = common.upgrade_cost(kind, level)
+    while purchased < buy_count:
+        cost = common.upgrade_cost(kind, level)
+        if common.total_holding(user) < cost:
+            next_cost = cost
+            break
+        spent = common.spend_amount(user, float(cost))
+        if spent is None:
+            next_cost = cost
+            break
+        _, idle_spent = spent
+        total_cost += float(cost)
+        total_idle_spent += float(idle_spent)
+        level += 1
+        purchased += 1
+        state[kind] = level
+        next_cost = common.upgrade_cost(kind, level)
+    if purchased <= 0:
         zhubi.save_data(data)
-        await ctx["reply"](event, f"猪币不足。升级 {kind} 需要 {common.format_amount(cost)}，你当前持有 {common.format_amount(holding)}。")
+        await ctx["reply"](event, f"猪币不足。升级 {kind} 需要 {common.format_amount(next_cost)}，你当前持有 {common.format_amount(common.total_holding(user))}。")
         return
-    spent = common.spend_amount(user, float(cost))
-    if spent is None:
-        zhubi.save_data(data)
-        await ctx["reply"](event, f"猪币不足。升级 {kind} 需要 {common.format_amount(cost)}，你当前持有 {common.format_amount(common.total_holding(user))}。")
-        return
-    main_spent, idle_spent = spent
-    state[kind] = level + 1
     if event.get("message_type") == "group":
         state["group_id"] = int(event.get("group_id", 0))
     zhubi.save_data(data)
     await notify_milestones(event, ctx, notifications)
-    idle_text = f"，从 idle 抵扣了 {common.format_amount(idle_spent)}" if idle_spent > 0 else ""
-    await ctx["reply"](event, f"已购买 {kind} 升级，消耗 {common.format_amount(cost)}{idle_text}。当前等级：{common.level_label(int(state[kind]))}。")
+    idle_text = f"，从 idle 抵扣了 {common.format_amount(total_idle_spent)}" if total_idle_spent > 0 else ""
+    partial_text = f"，余额不足，已尽可能购买 {purchased}/{buy_count} 级" if purchased < buy_count else ""
+    await ctx["reply"](event, f"已购买 {kind} 升级 {purchased} 级，消耗 {common.format_amount(total_cost)}{idle_text}{partial_text}。当前等级：{common.level_label(int(state[kind]))}。下级价格：{common.format_amount(next_cost)}。")
 
 
 async def handle_remake(event: dict[str, Any], ctx: dict[str, Any]) -> None:
@@ -227,14 +249,14 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         if action == "remake" and len(parts) == 1:
             await handle_remake(event, ctx)
             return
-        await ctx["reply"](event, "用法：/zhubi_idle [in/out 数量 | buy update quality|efficiency|speed | remake]")
+        await ctx["reply"](event, "用法：/zhubi_idle [in/out 数量 | buy update quality|efficiency|speed [购买级数] | remake]")
     finally:
         ctx["reply"] = _orig_reply
 
 
 COMMAND = {
     "name": "/zhubi_idle",
-    "usage": "/zhubi_idle [in/out <数量或nMAX+数字> | buy update quality|efficiency|speed | remake]",
+    "usage": "/zhubi_idle [in/out <数量或nMAX+数字> | buy update quality|efficiency|speed [购买级数] | remake]",
     "description": f"猪币放置游戏：投入猪币每秒按idle存量产出到主钱包，基础{common.IDLE_BASE_RATE}/单位，可买quality(每级+{common.QUALITY_STEP * 100}%倍率)/efficiency(每级+{common.IDLE_EFFICIENCY_STEP})/speed(×{common.SPEED_MULTIPLIER})升级，总和达到{common.MAX_UNIT:,}²时自动转生(每次转生×{1 + common.REMAKE_STEP})。",
     "handler": handler,
 }
