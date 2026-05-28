@@ -101,7 +101,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         await ctx["reply"](event, "没有找到这个编号。")
         return
     save_items(items, next_id)
-    await ctx["reply"](event, f"已移除 #{removed['id']}：{removed['text']}。当前剩余 {len(items)} 条。")
+    await ctx["reply"](event, f"已移除 #{removed['id']}，当前剩余 {len(items)} 条。\n{removed['text']}")
 
 
 COMMAND = {

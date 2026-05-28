@@ -30,10 +30,12 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         await ctx["reply"](event, f"不存在编号 #{target_id}。")
         return
     path = common.image_record_path(removed)
-    if path.exists():
-        path.unlink(missing_ok=True)
     common.save_items(items, next_id)
-    await ctx["reply"](event, f"已移除图片 #{target_id}，当前剩余 {len(items)} 张。")
+    if path.exists():
+        await ctx["reply"](event, [{"type": "text", "data": {"text": f"已移除图片 #{target_id}，当前剩余 {len(items)} 张。\n"}}, common.image_segment(path)])
+        path.unlink(missing_ok=True)
+    else:
+        await ctx["reply"](event, f"已移除图片 #{target_id}，但对应图片文件不存在。当前剩余 {len(items)} 张。")
 
 
 COMMAND = {
