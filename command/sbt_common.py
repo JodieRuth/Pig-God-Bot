@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -43,8 +44,15 @@ def normalize_data(data: Any) -> tuple[list[dict[str, Any]], int, bool]:
                 item_id = next_id
                 next_id += 1
                 changed = True
+            md5_value = str(raw.get("md5") or "").strip().lower()
+            if not md5_value:
+                try:
+                    md5_value = image_md5(Path(path))
+                    changed = True
+                except OSError:
+                    md5_value = ""
             used_ids.add(item_id)
-            items.append({"id": item_id, "path": path, "text": text, "sender_id": sender_id, "sender_name": sender_name})
+            items.append({"id": item_id, "path": path, "text": text, "sender_id": sender_id, "sender_name": sender_name, "md5": md5_value})
             next_id = max(next_id, item_id + 1)
             continue
         path = str(raw).strip()
@@ -54,7 +62,12 @@ def normalize_data(data: Any) -> tuple[list[dict[str, Any]], int, bool]:
         item_id = next_id
         next_id += 1
         used_ids.add(item_id)
-        items.append({"id": item_id, "path": path, "text": "", "sender_id": None, "sender_name": ""})
+        md5_value = ""
+        try:
+            md5_value = image_md5(Path(path))
+        except OSError:
+            pass
+        items.append({"id": item_id, "path": path, "text": "", "sender_id": None, "sender_name": "", "md5": md5_value})
         changed = True
     return items, next_id, changed
 
@@ -86,6 +99,31 @@ def parse_id(text: str) -> int | None:
 
 def image_record_path(item: dict[str, Any]) -> Path:
     return Path(str(item.get("path") or ""))
+
+
+def image_md5(path: Path) -> str:
+    return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def item_md5(item: dict[str, Any]) -> str:
+    value = str(item.get("md5") or "").strip().lower()
+    if value:
+        return value
+    path = image_record_path(item)
+    try:
+        return image_md5(path) if path.exists() else ""
+    except OSError:
+        return ""
+
+
+def find_duplicate_by_md5(items: list[dict[str, Any]], md5_value: str) -> dict[str, Any] | None:
+    lowered = md5_value.strip().lower()
+    if not lowered:
+        return None
+    for item in items:
+        if item_md5(item) == lowered:
+            return item
+    return None
 
 
 def image_segment(path: Path) -> dict[str, Any]:

@@ -850,7 +850,7 @@ def image_urls(message: list[dict[str, Any]]) -> list[str]:
         if seg.get("type") != "image":
             continue
         data = seg.get("data", {})
-        value = data.get("url") or data.get("file")
+        value = data.get("file") or data.get("url")
         if value:
             urls.append(value)
     return urls
@@ -1064,7 +1064,24 @@ async def download_image(session: aiohttp.ClientSession, url: str) -> Path | Non
         path = Path(url.removeprefix("file:///").removeprefix("file://"))
         log(f"Image is local file: {path}")
         return path if path.exists() else None
+    path = Path(url)
+    if path.exists():
+        log(f"Image is local path: {path}")
+        return path
     if not url.startswith(("http://", "https://")):
+        try:
+            data = onebot_response_data(await onebot_post("get_image", {"file": url}))
+        except Exception as exc:
+            log(f"OneBot get_image failed for {url[:200]}: {exception_detail(exc)}")
+            return None
+        if isinstance(data, dict):
+            for key in ("file", "path", "url"):
+                value = data.get(key)
+                if not value or str(value) == url:
+                    continue
+                resolved = await download_image(session, str(value))
+                if resolved is not None:
+                    return resolved
         log("Image skipped: unsupported URL/file format")
         return None
 

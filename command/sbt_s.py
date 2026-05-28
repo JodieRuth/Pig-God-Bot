@@ -18,12 +18,22 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if target is None or not target.exists():
         await ctx["reply"](event, "没有找到可收藏的图片：请在本条消息附图、回复一条带图消息，或先发送一张图片。")
         return
+    md5_value = common.image_md5(target)
+    duplicate = common.find_duplicate_by_md5(items, md5_value)
+    if duplicate is not None:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        await ctx["reply"](event, f"这张图片已收藏为 #{duplicate['id']}，不再重复收藏。")
+        return
     item = {
         "id": next_id,
         "path": str(target),
         "text": target.name,
         "sender_id": event.get("user_id"),
         "sender_name": str(event.get("sender", {}).get("card") or event.get("sender", {}).get("nickname") or event.get("user_id", "")),
+        "md5": md5_value,
     }
     items.append(item)
     common.save_items(items, next_id + 1)
