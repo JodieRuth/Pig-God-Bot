@@ -1568,6 +1568,53 @@ def select_tools(user_id: int) -> list[dict[str, Any]]:
     return [tool.copy() for tool in TOOL_DEFINITIONS]
 
 
+def normalize_tool_message_ids(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    pending_map: dict[str, str] = {}
+    pending_allowed: set[str] = set()
+    for raw_message in messages:
+        if not isinstance(raw_message, dict):
+            continue
+        message = raw_message.copy()
+        role = message.get("role")
+        if role == "assistant":
+            raw_tool_calls = message.get("tool_calls") or []
+            tool_calls: list[dict[str, Any]] = []
+            pending_map = {}
+            pending_allowed = set()
+            for raw_tool_call in raw_tool_calls:
+                if not isinstance(raw_tool_call, dict):
+                    continue
+                tool_call = raw_tool_call.copy()
+                original_id = str(tool_call.get("id") or "").strip()
+                normalized_id = f"call_{uuid.uuid4().hex}"
+                if original_id:
+                    pending_map[original_id] = normalized_id
+                tool_call["id"] = normalized_id
+                tool_calls.append(tool_call)
+                pending_allowed.add(normalized_id)
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+            else:
+                message.pop("tool_calls", None)
+            normalized.append(message)
+            continue
+        if role == "tool":
+            original_id = str(message.get("tool_call_id") or "").strip()
+            normalized_id = pending_map.get(original_id, original_id)
+            if normalized_id and normalized_id in pending_allowed:
+                message["tool_call_id"] = normalized_id
+                normalized.append(message)
+                pending_allowed.discard(normalized_id)
+            else:
+                log(f"Dropped orphan tool result before LLM request: tool_call_id={original_id}")
+            continue
+        pending_map = {}
+        pending_allowed = set()
+        normalized.append(message)
+    return normalized
+
+
 async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: list[str], images: list[dict[str, Any]], trigger_sender_id: int, system_prompt: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
     reload_runtime_files()
     llm_config = active_api_config("llm")
@@ -1604,16 +1651,17 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                     tool_names.append(name)
         log(f"LLM enabled tools: {', '.join(tool_names) if tool_names else 'none'}")
         use_stream = stream_enabled()
+        request_messages = normalize_tool_message_ids(messages)
         payload: dict[str, Any] = {
             "model": llm_model,
-            "messages": messages,
+            "messages": request_messages,
             "tools": tools,
             "tool_choice": "auto",
             "parallel_tool_calls": False,
         }
         if use_stream:
             payload["stream"] = True
-        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": messages, "tools": tool_names, "tool_choice": "auto", "parallel_tool_calls": False, "stream": use_stream}, "headers": headers})
+        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": request_messages, "tools": tool_names, "tool_choice": "auto", "parallel_tool_calls": False, "stream": use_stream}, "headers": headers})
 
         async def request_chat_once() -> tuple[dict[str, Any], list[dict[str, Any]]]:
             await LLM_RPM_LIMITER.acquire()
