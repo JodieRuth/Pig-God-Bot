@@ -1688,17 +1688,30 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                 log(f"LLM request failed, retrying in 12s ({request_attempt + 1}/{max_retries}): {exception_detail(exc)}")
                 await asyncio.sleep(12)
         if tool_calls:
+            tool_calls = [tool_call for tool_call in tool_calls if isinstance(tool_call, dict)]
+            if not tool_calls:
+                log("LLM returned only invalid tool call entries; treating as empty reply")
+                continue
             if len(tool_calls) > 1:
                 log(f"LLM returned {len(tool_calls)} tool calls; keeping only the first one to preserve strict tool_result ordering")
                 tool_calls = tool_calls[:1]
+            tool_call_id_map: dict[str, str] = {}
             for tool_call in tool_calls:
-                if isinstance(tool_call, dict) and not tool_call.get("id"):
-                    tool_call["id"] = f"call_{uuid.uuid4().hex}"
+                if not isinstance(tool_call, dict):
+                    continue
+                original_id = str(tool_call.get("id") or "").strip()
+                normalized_id = f"call_{uuid.uuid4().hex}"
+                if original_id:
+                    tool_call_id_map[original_id] = normalized_id
+                tool_call["id"] = normalized_id
+            log_json("LLM tool call id map", tool_call_id_map)
             log_json("LLM tool calls", tool_calls)
             assistant_content = message.get("content")
             assistant_message = {"role": "assistant", "content": assistant_content if isinstance(assistant_content, str) else "", "tool_calls": tool_calls}
             if "reasoning_content" in message:
                 assistant_message["reasoning_content"] = message.get("reasoning_content") or ""
+            if "reasoning" in message:
+                assistant_message["reasoning"] = message.get("reasoning") or ""
             messages.append(assistant_message)
             context_mutating_tool_names = {"vndb_detail", "pixiv_search_tag", "pixiv_search_title", "pixiv_detail", "pixiv_select_result"}
             has_context_mutating_tool = any(
