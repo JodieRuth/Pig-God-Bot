@@ -13,12 +13,11 @@ spec.loader.exec_module(common)
 
 
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
-    source = common.choose_source_image(event, ctx)
-    if source is None or not source.exists():
+    items, next_id = common.load_items()
+    target = await common.save_source_image(event, ctx, next_id)
+    if target is None or not target.exists():
         await ctx["reply"](event, "没有找到可收藏的图片：请在本条消息附图、回复一条带图消息，或先发送一张图片。")
         return
-    items, next_id = common.load_items()
-    target = common.copy_image(source, next_id)
     item = {
         "id": next_id,
         "path": str(target),

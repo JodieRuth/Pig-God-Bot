@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from pathlib import Path
 from typing import Any
+
+import aiohttp
 
 DATA_FILE = Path(__file__).with_name("sbt.json")
 IMAGE_DIR = Path(__file__).with_name("sbt_images")
@@ -90,31 +91,110 @@ def image_segment(path: Path) -> dict[str, Any]:
     return {"type": "image", "data": {"file": path.as_uri()}}
 
 
+def suffix_from_bytes(data: bytes, content_type: str = "", fallback: str = "") -> str:
+    lowered = content_type.lower()
+    if data.startswith((b"GIF87a", b"GIF89a")) or "gif" in lowered:
+        return ".gif"
+    if data.startswith(b"\x89PNG\r\n\x1a\n") or "png" in lowered:
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff") or "jpeg" in lowered or "jpg" in lowered:
+        return ".jpg"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP" or "webp" in lowered:
+        return ".webp"
+    suffix = Path(fallback).suffix.lower()
+    return suffix if suffix else ".png"
+
+
 def copy_image(source: Path, item_id: int) -> Path:
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    suffix = source.suffix or ".png"
+    data = source.read_bytes()
+    suffix = suffix_from_bytes(data, fallback=source.name)
     target = IMAGE_DIR / f"{item_id}{suffix}"
-    shutil.copy2(source, target)
+    target.write_bytes(data)
     return target
 
 
-def message_images(message: list[dict[str, Any]]) -> list[Path]:
-    images: list[Path] = []
+async def save_image_ref(value: str, item_id: int) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("file://"):
+        path = Path(text.removeprefix("file:///").removeprefix("file://"))
+        return copy_image(path, item_id) if path.exists() else None
+    path = Path(text)
+    if path.exists():
+        return copy_image(path, item_id)
+    if not text.startswith(("http://", "https://")):
+        return None
+    async with aiohttp.ClientSession() as session:
+        async with session.get(text, timeout=60) as resp:
+            resp.raise_for_status()
+            data = await resp.read()
+            suffix = suffix_from_bytes(data, resp.headers.get("content-type", ""), text)
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    target = IMAGE_DIR / f"{item_id}{suffix}"
+    target.write_bytes(data)
+    return target
+
+
+def onebot_response_data(response: Any) -> Any:
+    if isinstance(response, dict) and "data" in response and ("status" in response or "retcode" in response):
+        return response.get("data")
+    return response
+
+
+def message_image_refs(message: list[dict[str, Any]]) -> list[str]:
+    refs: list[str] = []
     for seg in message:
         if not isinstance(seg, dict) or seg.get("type") != "image":
             continue
         data = seg.get("data", {}) if isinstance(seg.get("data"), dict) else {}
-        value = data.get("file") or data.get("url")
+        for key in ("file", "url"):
+            value = data.get(key)
+            if value:
+                refs.append(str(value))
+    return refs
+
+
+async def save_image_segment(seg: dict[str, Any], item_id: int, ctx: dict[str, Any]) -> Path | None:
+    data = seg.get("data", {}) if isinstance(seg.get("data"), dict) else {}
+    file_value = data.get("file")
+    if file_value and callable(ctx.get("onebot_post")):
+        try:
+            response = onebot_response_data(await ctx["onebot_post"]("get_image", {"file": str(file_value)}))
+        except Exception:
+            response = None
+        if isinstance(response, dict):
+            for key in ("file", "path", "url"):
+                value = response.get(key)
+                if not value:
+                    continue
+                try:
+                    saved = await save_image_ref(str(value), item_id)
+                except Exception:
+                    saved = None
+                if saved is not None:
+                    return saved
+    for key in ("file", "url"):
+        value = data.get(key)
         if not value:
             continue
-        if str(value).startswith("file://"):
-            try:
-                images.append(Path(str(value)[7:]))
-            except Exception:
-                continue
-        else:
-            images.append(Path(str(value)))
-    return images
+        try:
+            saved = await save_image_ref(str(value), item_id)
+        except Exception:
+            saved = None
+        if saved is not None:
+            return saved
+    return None
+
+
+async def save_first_image_from_message(message: list[dict[str, Any]], item_id: int, ctx: dict[str, Any]) -> Path | None:
+    for seg in message:
+        if isinstance(seg, dict) and seg.get("type") == "image":
+            saved = await save_image_segment(seg, item_id, ctx)
+            if saved is not None:
+                return saved
+    return None
 
 
 def extract_event_images(event: dict[str, Any]) -> list[Path]:
@@ -152,10 +232,28 @@ def choose_source_image(event: dict[str, Any], ctx: dict[str, Any]) -> Path | No
     replied = event.get("reply")
     if isinstance(replied, dict):
         replied_segments = replied.get("message") if isinstance(replied.get("message"), list) else []
-        for path in message_images(replied_segments):
+        for ref in message_image_refs(replied_segments):
+            path = Path(ref.removeprefix("file:///").removeprefix("file://")) if ref.startswith("file://") else Path(ref)
             if path.exists():
                 return path
     latest = latest_sender_image(event, ctx)
     if latest and latest.exists():
         return latest
+    return None
+
+
+async def save_source_image(event: dict[str, Any], ctx: dict[str, Any], item_id: int) -> Path | None:
+    message = event.get("message") if isinstance(event.get("message"), list) else []
+    saved = await save_first_image_from_message(message, item_id, ctx)
+    if saved is not None:
+        return saved
+    replied = event.get("reply")
+    if isinstance(replied, dict):
+        replied_segments = replied.get("message") if isinstance(replied.get("message"), list) else []
+        saved = await save_first_image_from_message(replied_segments, item_id, ctx)
+        if saved is not None:
+            return saved
+    latest = latest_sender_image(event, ctx)
+    if latest and latest.exists():
+        return copy_image(latest, item_id)
     return None
