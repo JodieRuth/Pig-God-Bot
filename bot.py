@@ -786,7 +786,7 @@ def forward_message_text(message: list[dict[str, Any]]) -> str:
         data = seg.get("data", {})
         if typ == "text":
             parts.append(data.get("text", ""))
-        elif typ == "image":
+        elif typ in {"image", "mface"}:
             parts.append("[图片]")
         elif typ == "at":
             qq = str(data.get("qq") or "")
@@ -847,10 +847,10 @@ async def is_reply_to_bot(message: list[dict[str, Any]], replied: dict[str, Any]
 def image_urls(message: list[dict[str, Any]]) -> list[str]:
     urls = []
     for seg in message:
-        if seg.get("type") != "image":
+        if seg.get("type") not in {"image", "mface"}:
             continue
         data = seg.get("data", {})
-        value = data.get("file") or data.get("url")
+        value = data.get("file") or data.get("path") or data.get("url")
         if value:
             urls.append(value)
     return urls

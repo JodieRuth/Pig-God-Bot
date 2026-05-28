@@ -188,13 +188,17 @@ def onebot_response_data(response: Any) -> Any:
     return response
 
 
+def is_image_like_segment(seg: dict[str, Any]) -> bool:
+    return seg.get("type") in {"image", "mface"}
+
+
 def message_image_refs(message: list[dict[str, Any]]) -> list[str]:
     refs: list[str] = []
     for seg in message:
-        if not isinstance(seg, dict) or seg.get("type") != "image":
+        if not isinstance(seg, dict) or not is_image_like_segment(seg):
             continue
         data = seg.get("data", {}) if isinstance(seg.get("data"), dict) else {}
-        for key in ("file", "url"):
+        for key in ("file", "path", "url"):
             value = data.get(key)
             if value:
                 refs.append(str(value))
@@ -220,7 +224,7 @@ async def save_image_segment(seg: dict[str, Any], item_id: int, ctx: dict[str, A
                     saved = None
                 if saved is not None:
                     return saved
-    for key in ("file", "url"):
+    for key in ("file", "path", "url"):
         value = data.get(key)
         if not value:
             continue
@@ -235,7 +239,7 @@ async def save_image_segment(seg: dict[str, Any], item_id: int, ctx: dict[str, A
 
 async def save_first_image_from_message(message: list[dict[str, Any]], item_id: int, ctx: dict[str, Any], sender_id: Any = None, saved_at: datetime | None = None) -> Path | None:
     for seg in message:
-        if isinstance(seg, dict) and seg.get("type") == "image":
+        if isinstance(seg, dict) and is_image_like_segment(seg):
             saved = await save_image_segment(seg, item_id, ctx, sender_id, saved_at)
             if saved is not None:
                 return saved
@@ -296,17 +300,23 @@ def choose_source_image(event: dict[str, Any], ctx: dict[str, Any]) -> Path | No
     return None
 
 
+def has_reply_segment(message: list[dict[str, Any]]) -> bool:
+    return any(isinstance(seg, dict) and seg.get("type") == "reply" for seg in message)
+
+
 async def save_source_image(event: dict[str, Any], ctx: dict[str, Any], item_id: int) -> Path | None:
     sender_id = event.get("user_id")
     saved_at = datetime.now()
     message = event.get("message") if isinstance(event.get("message"), list) else []
-    saved = await save_first_image_from_message(message, item_id, ctx, sender_id, saved_at)
-    if saved is not None:
-        return saved
-    current = cached_image_from_event(event, "current_images")
-    if current is not None:
-        return copy_image(current, item_id, sender_id, saved_at)
     replied = event.get("reply")
+    is_reply_command = has_reply_segment(message) or isinstance(replied, dict)
+    if not is_reply_command:
+        saved = await save_first_image_from_message(message, item_id, ctx, sender_id, saved_at)
+        if saved is not None:
+            return saved
+        current = cached_image_from_event(event, "current_images")
+        if current is not None:
+            return copy_image(current, item_id, sender_id, saved_at)
     if isinstance(replied, dict):
         replied_segments = replied.get("message") if isinstance(replied.get("message"), list) else []
         saved = await save_first_image_from_message(replied_segments, item_id, ctx, sender_id, saved_at)
@@ -315,6 +325,11 @@ async def save_source_image(event: dict[str, Any], ctx: dict[str, Any], item_id:
     replied_cached = cached_image_from_event(event, "replied_images")
     if replied_cached is not None:
         return copy_image(replied_cached, item_id, sender_id, saved_at)
+    if is_reply_command:
+        saved = await save_first_image_from_message(message, item_id, ctx, sender_id, saved_at)
+        if saved is not None:
+            return saved
+        return None
     latest = latest_sender_image(event, ctx)
     if latest and latest.exists():
         return copy_image(latest, item_id, sender_id, saved_at)
