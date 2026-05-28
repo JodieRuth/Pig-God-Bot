@@ -1129,13 +1129,42 @@ def onebot_response_data(response: Any) -> Any:
     return response
 
 
+def cq_unescape(value: str) -> str:
+    return value.replace("&#91;", "[").replace("&#93;", "]").replace("&#44;", ",").replace("&amp;", "&")
+
+
+def parse_cq_message(text: str) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    position = 0
+    for match in re.finditer(r"\[CQ:([a-zA-Z0-9_]+)((?:,[^\]]*)?)\]", text):
+        if match.start() > position:
+            segments.append({"type": "text", "data": {"text": cq_unescape(text[position:match.start()])}})
+        typ = match.group(1)
+        raw_data = match.group(2).lstrip(",")
+        data: dict[str, Any] = {}
+        if raw_data:
+            for part in raw_data.split(","):
+                key, sep, value = part.partition("=")
+                if sep and key:
+                    data[key] = cq_unescape(value)
+        segments.append({"type": typ, "data": data})
+        position = match.end()
+    if position < len(text):
+        segments.append({"type": "text", "data": {"text": cq_unescape(text[position:])}})
+    return segments
+
+
 def message_segments(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, str):
+        return parse_cq_message(value)
     if isinstance(value, dict):
         message = value.get("message")
         if isinstance(message, list):
             return [item for item in message if isinstance(item, dict)]
+        if isinstance(message, str):
+            return parse_cq_message(message)
     return []
 
 

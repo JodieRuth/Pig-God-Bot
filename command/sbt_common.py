@@ -253,6 +253,15 @@ def extract_event_images(event: dict[str, Any]) -> list[Path]:
     return images
 
 
+def cached_image_from_event(event: dict[str, Any], key: str) -> Path | None:
+    for record in event.get(key) or []:
+        if isinstance(record, dict) and record.get("path"):
+            path = Path(str(record.get("path")))
+            if path.exists():
+                return path
+    return None
+
+
 def latest_sender_image(event: dict[str, Any], ctx: dict[str, Any]) -> Path | None:
     sender_id = int(event.get("user_id", 0))
     scope = ctx.get("scope_key")
@@ -294,12 +303,18 @@ async def save_source_image(event: dict[str, Any], ctx: dict[str, Any], item_id:
     saved = await save_first_image_from_message(message, item_id, ctx, sender_id, saved_at)
     if saved is not None:
         return saved
+    current = cached_image_from_event(event, "current_images")
+    if current is not None:
+        return copy_image(current, item_id, sender_id, saved_at)
     replied = event.get("reply")
     if isinstance(replied, dict):
         replied_segments = replied.get("message") if isinstance(replied.get("message"), list) else []
         saved = await save_first_image_from_message(replied_segments, item_id, ctx, sender_id, saved_at)
         if saved is not None:
             return saved
+    replied_cached = cached_image_from_event(event, "replied_images")
+    if replied_cached is not None:
+        return copy_image(replied_cached, item_id, sender_id, saved_at)
     latest = latest_sender_image(event, ctx)
     if latest and latest.exists():
         return copy_image(latest, item_id, sender_id, saved_at)

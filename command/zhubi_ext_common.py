@@ -284,16 +284,16 @@ def apply_idle_income_to_user(user: dict[str, Any], now: float | None = None) ->
     change_balance(user, gain)
     if enforce_auto_remake(user):
         return True, len(MILESTONES) - 1, "自动转生", 0.0
-    total_after = idle_total_coins(state)
-    reached = milestone_index(max(total_after, balance_of(user)))
+    holding_after = total_holding(user)
+    reached = milestone_index(holding_after)
     previous = int(state.get("last_milestone", -1))
     if reached > previous:
         state["last_milestone"] = reached
         label = MILESTONES[reached][1]
         if reached == len(MILESTONES) - 1:
             state["cleared"] = True
-        return True, reached, label, total_after
-    return True, -1, "", total_after
+        return True, reached, label, holding_after
+    return True, -1, "", holding_after
 
 
 def flush_idle_data() -> None:

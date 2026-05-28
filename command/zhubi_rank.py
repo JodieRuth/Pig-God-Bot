@@ -43,16 +43,16 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     rows: list[tuple[float, str, str]] = []
     for user_id in member_ids:
         user = zhubi.user_data(data, user_id)
-        balance = common.balance_of(user)
-        if balance > 0:
-            rows.append((balance, user_id, names.get(user_id, user_id)))
+        total = common.total_holding(user)
+        if total > 0:
+            rows.append((total, user_id, names.get(user_id, user_id)))
     zhubi.save_data(data)
     if not rows:
         await ctx["reply"](event, "本群暂时没有人持有猪币。")
         return
     rows.sort(key=lambda item: item[0], reverse=True)
     rank_by_user = {user_id: index for index, (_, user_id, _) in enumerate(rows, start=1)}
-    lines = ["本群猪币排行前 10："]
+    lines = ["本群猪币总持有量排行前 10："]
     for index, (balance, user_id, name) in enumerate(rows[:10], start=1):
         lines.append(f"{index}. {name}：{common.format_amount(balance)}")
     sender_rank = rank_by_user.get(sender_id)
@@ -69,6 +69,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 COMMAND = {
     "name": "/zhubi_rank",
     "usage": "/zhubi_rank",
-    "description": "列出本群成员猪币排行前 10，并显示命令发送者当前名次。",
+    "description": "列出本群成员猪币总持有量排行前 10，并显示命令发送者当前名次。",
     "handler": handler,
 }
