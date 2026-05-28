@@ -1330,6 +1330,7 @@ def image_suffix_for_format(format_name: str) -> str:
         "JPG": ".jpg",
         "PNG": ".png",
         "WEBP": ".webp",
+        "GIF": ".gif",
     }.get(format_name.upper(), ".png")
 
 
@@ -1339,6 +1340,7 @@ def image_content_type(path: Path) -> str:
         "JPG": "image/jpeg",
         "PNG": "image/png",
         "WEBP": "image/webp",
+        "GIF": "image/gif",
     }.get(image_format(path), "image/png")
 
 
@@ -1366,16 +1368,15 @@ def to_static_image(path: Path) -> Path:
 
 
 def normalize_cached_image(path: Path) -> Path:
-    static_path = to_static_image(path)
-    format_name = image_format(static_path)
+    format_name = image_format(path)
     suffix = image_suffix_for_format(format_name)
-    target = static_path.with_suffix(suffix)
-    if static_path == target:
-        return static_path
+    target = path.with_suffix(suffix)
+    if path == target:
+        return path
     if target.exists():
         target.unlink()
-    static_path.replace(target)
-    log(f"Image suffix normalized: {static_path} -> {target}")
+    path.replace(target)
+    log(f"Image suffix normalized: {path} -> {target}")
     return target
 
 
