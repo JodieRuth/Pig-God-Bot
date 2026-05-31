@@ -3097,14 +3097,6 @@ async def handle_event(event: dict[str, Any]) -> None:
             log("Ignored bot self message after caching context")
             return
 
-        if event.get("message_type") == "group":
-            at_bot = is_at_bot(message)
-            reply_to_bot = await is_reply_to_bot(message, replied_message)
-            if (at_bot or reply_to_bot) and not text.strip() and (current_images or replied_images):
-                log("Dispatching group animetrace shortcut for image-only mention/reply")
-                await handle_command(event, "/animetrace")
-                return
-
         if not text:
             log("Ignored image/media-only message after caching context")
             return
