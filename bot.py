@@ -2418,6 +2418,13 @@ def clear_all_contexts() -> int:
     return count + image_count
 
 
+def current_context_count(event: dict[str, Any]) -> int:
+    key = scope_key(event)
+    count = len(contexts.get(key, []))
+    image_count = sum(len(items) for cache_key, items in last_images_by_sender.items() if cache_key[0] == key)
+    return count + image_count
+
+
 def clear_current_context(event: dict[str, Any]) -> int:
     key = scope_key(event)
     count = len(contexts.get(key, []))
@@ -2585,6 +2592,7 @@ def command_context() -> dict[str, Any]:
         "admin_users": ADMIN_USERS,
         "bot_qq": BOT_QQ,
         "clear_contexts": clear_all_contexts,
+        "current_context_count": current_context_count,
         "clear_current_context": clear_current_context,
         "reboot_process": reboot_process,
         "stop_vndb_json_server": stop_vndb_json_server,
