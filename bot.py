@@ -445,6 +445,7 @@ def build_scope_active_prompt() -> None:
     scope_active_prompt = new_scope
 
 
+scope_active_prompt: dict[str, str] = {}
 PROMPT_CONFIGS = load_prompt_configs()
 build_scope_active_prompt()
 
@@ -494,7 +495,6 @@ def reload_runtime_files(force: bool = False) -> None:
         log("Reloaded prompts.json runtime config")
 
 
-scope_active_prompt: dict[str, str] = {}
 
 def active_prompt_id(scope_key: str = "") -> str:
     if scope_key and scope_key in scope_active_prompt and scope_active_prompt[scope_key] in PROMPT_CONFIGS:
