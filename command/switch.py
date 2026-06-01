@@ -75,13 +75,21 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         return
     parsed = parse_args(arg)
     if parsed is None:
-        await ctx["reply"](event, "用法：/switch llm <modelname[#N]>、/switch image <modelname[#N]>、/switch prompt <编号>、/switch photo true|false、/switch stream true|false 或 /switch retry <次数>")
+        await ctx["reply"](event, "用法：/switch llm <modelname[#N]>、/switch image <modelname[#N]>、/switch prompt <编号>、/switch photo true|false|<工具轮图片上限>、/switch stream true|false 或 /switch retry <次数>")
         return
     kind, value = parsed
     if kind == "photo":
         normalized = value.lower()
+        if value.isdigit():
+            limit = int(value)
+            if limit <= 0:
+                await ctx["reply"](event, "工具轮图片上限必须是正整数。")
+                return
+            ctx["set_tool_image_limit"](limit)
+            await ctx["reply"](event, f"已设置 LLM 工具轮图片上限：{limit}。初始触发输入图片上限仍为 {ctx['max_context_images']}。当前 /switch photo false 时该上限不会生效。")
+            return
         if normalized not in {"true", "false", "1", "0", "on", "off", "yes", "no"}:
-            await ctx["reply"](event, "用法：/switch photo true|false")
+            await ctx["reply"](event, "用法：/switch photo true|false|<工具轮图片上限>")
             return
         enabled = normalized in {"true", "1", "on", "yes"}
         ctx["set_photo_enabled"](enabled)
@@ -195,7 +203,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
 COMMAND = {
     "name": "/switch",
-    "usage": "/switch llm/image <modelname[#N]>、/switch prompt <编号>、/switch photo true|false、/switch stream true|false 或 /switch retry <次数>",
-    "description": "仅所有者可用：切换当前使用的 LLM、图片 API、prompt、图片输入开关、流式传输开关或上游错误重试次数。",
+    "usage": "/switch llm/image <modelname[#N]>、/switch prompt <编号>、/switch photo true|false|<工具轮图片上限>、/switch stream true|false 或 /switch retry <次数>",
+    "description": "仅所有者可用：切换当前使用的 LLM、图片 API、prompt、图片输入开关、LLM 工具轮图片上限、流式传输开关或上游错误重试次数。",
     "handler": handler,
 }

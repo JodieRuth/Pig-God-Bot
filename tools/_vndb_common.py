@@ -671,7 +671,8 @@ async def execute_action(action: str, args: dict[str, Any], runtime: dict[str, A
                 record = add_image_context(runtime["event"], path, f"VNDB 详情图片已加入上下文: {path.name}")
                 images = runtime.setdefault("images", [])
                 if isinstance(images, list) and record not in images:
-                    max_images = int(ctx.get("max_context_images", 10) or 10)
+                    limit_getter = ctx.get("max_tool_context_images")
+                    max_images = int(limit_getter() if callable(limit_getter) else ctx.get("max_context_images", 10) or 10)
                     while len(images) >= max_images and images:
                         images.pop(0)
                     images.append(record)

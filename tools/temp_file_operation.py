@@ -163,7 +163,8 @@ def add_png_to_runtime(path: Path, runtime: dict[str, Any], ctx: dict[str, Any])
         return "?"
     if record in images:
         images.remove(record)
-    max_images = int(ctx.get("max_context_images", 10) or 10)
+    limit_getter = ctx.get("max_tool_context_images")
+    max_images = int(limit_getter() if callable(limit_getter) else ctx.get("max_context_images", 10) or 10)
     while len(images) >= max_images and images:
         images.pop(0)
     images.append(record)

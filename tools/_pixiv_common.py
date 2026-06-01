@@ -980,7 +980,8 @@ def add_images_to_runtime(items: list[tuple[Path, str]], runtime: dict[str, Any]
     images = runtime.setdefault("images", [])
     if not isinstance(images, list):
         return ["?" for _ in items]
-    max_images = int(ctx.get("max_context_images", 10) or 10)
+    limit_getter = ctx.get("max_tool_context_images")
+    max_images = int(limit_getter() if callable(limit_getter) else ctx.get("max_context_images", 10) or 10)
     for record in records:
         if record in images:
             images.remove(record)

@@ -264,12 +264,19 @@ def default_retry_count() -> int:
         return 3
 
 
+def default_tool_image_limit() -> int:
+    try:
+        return max(1, int(os.getenv("LLM_TOOL_IMAGE_LIMIT", "30")))
+    except ValueError:
+        return 30
+
+
 def env_active_runtime_state() -> dict[str, Any]:
     return {
         "llm": {"api_index": os.getenv("ACTIVE_LLM_API_INDEX", "0"), "model": os.getenv("ACTIVE_LLM_MODEL", OPENAI_MODEL)},
         "image": {"api_index": os.getenv("ACTIVE_IMAGE_API_INDEX", "0"), "model": os.getenv("ACTIVE_IMAGE_MODEL", IMAGE_MODEL)},
         "prompt": {"id": os.getenv("ACTIVE_PROMPT_ID", "1")},
-        "photo": {"enabled": os.getenv("ACTIVE_PHOTO_ENABLED", "1") != "0"},
+        "photo": {"enabled": os.getenv("ACTIVE_PHOTO_ENABLED", "1") != "0", "tool_image_limit": default_tool_image_limit()},
         "stream": {"enabled": os.getenv("ACTIVE_STREAM_ENABLED", "1") != "0"},
         "retry": {"count": default_retry_count()},
     }
@@ -332,6 +339,7 @@ def apply_env_active_state_to_runtime() -> None:
         runtime_state[kind]["model"] = str(env_state[kind]["model"])
     runtime_state.setdefault("prompt", {})["id"] = str(env_state["prompt"]["id"])
     runtime_state.setdefault("photo", {})["enabled"] = bool(env_state["photo"]["enabled"])
+    runtime_state.setdefault("photo", {})["tool_image_limit"] = int(env_state["photo"]["tool_image_limit"])
     runtime_state.setdefault("stream", {})["enabled"] = bool(env_state["stream"]["enabled"])
     runtime_state.setdefault("retry", {})["count"] = int(env_state["retry"]["count"])
     save_runtime_state(runtime_state)
@@ -533,6 +541,22 @@ def set_active_prompt(prompt_id: str, scope_key: str = "") -> bool:
 def photo_enabled() -> bool:
     photo_state = runtime_state.get("photo", {})
     return bool(photo_state.get("enabled", True)) if isinstance(photo_state, dict) else True
+
+
+def tool_image_limit() -> int:
+    photo_state = runtime_state.get("photo", {})
+    try:
+        return max(1, int(photo_state.get("tool_image_limit", 30))) if isinstance(photo_state, dict) else 30
+    except (TypeError, ValueError):
+        return 30
+
+
+def set_tool_image_limit(limit: int) -> bool:
+    value = max(1, int(limit))
+    runtime_state.setdefault("photo", {})["tool_image_limit"] = value
+    save_runtime_state(runtime_state)
+    set_env_value("LLM_TOOL_IMAGE_LIMIT", str(value))
+    return True
 
 
 def set_photo_enabled(enabled: bool) -> bool:
@@ -1470,11 +1494,12 @@ def visible_images_for_sender(key: str, sender_id: int) -> list[dict[str, Any]]:
     return list(reversed(images))
 
 
-def build_image_context_note(images: list[dict[str, Any]]) -> str:
+def build_image_context_note(images: list[dict[str, Any]], limit: int | None = None) -> str:
     if not images:
         return "当前没有可用图片。"
+    image_limit = MAX_CONTEXT_IMAGES if limit is None else max(1, int(limit))
     lines = ["输入图片按消息/上下文时间顺序编号如下："]
-    for index, record in enumerate(images[:MAX_CONTEXT_IMAGES], start=1):
+    for index, record in enumerate(images[:image_limit], start=1):
         path = image_path(record)
         lines.append(f"图{index} = 第 {index} 张输入图片，文件名 {path.name}，发送者 {image_sender_label(record)}")
     lines.append("当用户提到图1、图2、第一张、第二张时，必须按这个编号理解；不要自行交换图片顺序。")
@@ -1501,10 +1526,11 @@ def build_openai_messages(prompt: str, context_texts: list[str], context_notes: 
 
 
 def build_updated_tool_image_content(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    image_note = build_image_context_note(images)
+    image_limit = tool_image_limit()
+    image_note = build_image_context_note(images, image_limit)
     text = "工具刚刚更新了当前 LLM 图片上下文。请查看下面重新提供的图片。\n\n" + image_note
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
-    for record in images[:MAX_CONTEXT_IMAGES]:
+    for record in images[:image_limit]:
         content.append({"type": "image_url", "image_url": {"url": image_data_url(image_path(record))}})
     return content
 
@@ -1761,7 +1787,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             if "reasoning" in message:
                 assistant_message["reasoning"] = message.get("reasoning") or ""
             messages.append(assistant_message)
-            context_mutating_tool_names = {"vndb_detail", "pixiv_search_tag", "pixiv_search_title", "pixiv_detail", "pixiv_select_result"}
+            context_mutating_tool_names = {"getprofile", "vndb_detail", "pixiv_search_tag", "pixiv_search_title", "pixiv_detail", "pixiv_select_result"}
             has_context_mutating_tool = any(
                 str((tool_call.get("function", {}) if isinstance(tool_call, dict) else {}).get("name") or "").strip().lower() in context_mutating_tool_names
                 for tool_call in tool_calls
@@ -1806,7 +1832,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                     context_mutated_success = True
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
                 log_json("Tool execution result", {"tool": tool_name, "result": result})
-            if context_mutated_success and tool_runtime.get("images"):
+            if context_mutated_success and photo_enabled() and tool_runtime.get("images"):
                 messages.append({"role": "user", "content": build_updated_tool_image_content(tool_runtime.get("images", []))})
             continue
         reply_text = message.get("content") or ""
@@ -2585,6 +2611,8 @@ def command_context() -> dict[str, Any]:
         "set_active_prompt": set_active_prompt,
         "set_photo_enabled": set_photo_enabled,
         "photo_enabled": photo_enabled,
+        "set_tool_image_limit": set_tool_image_limit,
+        "tool_image_limit": tool_image_limit,
         "set_stream_enabled": set_stream_enabled,
         "stream_enabled": stream_enabled,
         "set_retry_count": set_retry_count,
@@ -2605,6 +2633,7 @@ def command_context() -> dict[str, Any]:
         "clear_tools_temp_dir": clear_tools_temp_dir,
         "output_dir": OUTPUT_DIR,
         "max_context_images": MAX_CONTEXT_IMAGES,
+        "max_tool_context_images": tool_image_limit,
         "max_context_messages": MAX_CONTEXT_MESSAGES,
         "image_path": image_path,
         "image_sender_label": image_sender_label,
