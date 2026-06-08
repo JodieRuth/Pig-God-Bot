@@ -4,3 +4,4 @@ python-dotenv>=1.0.0
 Pillow>=10.0.0
 playwright>=1.40.0
 crawl4ai>=0.7.0
+lunar-python>=1.4.8
