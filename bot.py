@@ -893,12 +893,28 @@ def recent_context_label(item: dict[str, Any]) -> str:
     return f"QQ {item['user_id']}"
 
 
-def context_message_records(key: str) -> list[dict[str, Any]]:
+def recent_context_items(key: str) -> list[dict[str, Any]]:
     now = time.time()
-    records: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    seen_message_ids: set[str] = set()
     for item in reversed(contexts[key]):
         if now - item["time"] > MAX_CONTEXT_AGE_SECONDS:
             continue
+        message_id = item.get("message_id")
+        if message_id is not None:
+            message_id_text = str(message_id)
+            if message_id_text in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id_text)
+        items.append(item)
+        if len(items) >= MAX_CONTEXT_MESSAGES:
+            break
+    return list(reversed(items))
+
+
+def context_message_records(key: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for item in recent_context_items(key):
         message_id = item.get("message_id")
         if message_id is None:
             continue
@@ -918,12 +934,9 @@ def context_message_records(key: str) -> list[dict[str, Any]]:
 
 
 def recent_context(key: str) -> tuple[list[str], list[dict[str, Any]]]:
-    now = time.time()
     texts: list[str] = []
     images: list[dict[str, Any]] = []
-    for item in reversed(contexts[key]):
-        if now - item["time"] > MAX_CONTEXT_AGE_SECONDS:
-            continue
+    for item in recent_context_items(key):
         has_text = bool(item.get("text"))
         has_images = bool(item.get("images"))
         message_id = item.get("message_id")
@@ -1509,13 +1522,13 @@ def build_image_context_note(images: list[dict[str, Any]], limit: int | None = N
     return "\n".join(lines)
 
 
-def build_openai_messages(prompt: str, context_texts: list[str], context_notes: str, images: list[dict[str, Any]], trigger_sender_id: int, system_prompt: str) -> list[dict[str, Any]]:
+def build_openai_messages(prompt: str, context_texts: list[str], images: list[dict[str, Any]], trigger_sender_id: int, system_prompt: str) -> list[dict[str, Any]]:
     context = "\n".join(context_texts[-MAX_CONTEXT_MESSAGES:])
     image_note = build_image_context_note(images)
     if context:
-        user_text = f"最近群聊上下文：\n{context}\n\n{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}\n\n当前请求：\n{prompt}"
+        user_text = f"最近群聊上下文（每条都已含 message_id，最后一条就是当前请求）：\n{context}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}\n\n请直接基于最后一条消息回答，必要时可用其中的 message_id 回复。"
     else:
-        user_text = f"{context_notes}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}\n\n当前请求：\n{prompt}"
+        user_text = f"当前请求：\n{prompt}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}"
     content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
     for record in images[:MAX_CONTEXT_IMAGES]:
         content.append({"type": "image_url", "image_url": {"url": image_data_url(image_path(record))}})
@@ -1533,18 +1546,6 @@ def build_updated_tool_image_content(images: list[dict[str, Any]]) -> list[dict[
     for record in images[:image_limit]:
         content.append({"type": "image_url", "image_url": {"url": image_data_url(image_path(record))}})
     return content
-
-
-def build_context_message_note(records: list[dict[str, Any]]) -> str:
-    if not records:
-        return "最近可直接回复的上下文消息 ID 列表：\n无"
-    lines = ["最近可直接回复的上下文消息 ID 列表："]
-    for item in records[-MAX_CONTEXT_MESSAGES:]:
-        message_id = item.get("message_id")
-        label = item.get("label") or ""
-        text = item.get("text") or ""
-        lines.append(f"message_id={message_id} | {label} | {text}")
-    return "\n".join(lines)
 
 
 def is_group_mentioned_command(message: list[dict[str, Any]], text: str) -> bool:
@@ -1652,7 +1653,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         return {"type": "text", "text": f"已收到：{prompt}{image_note}\n\n请在 .env 里配置 OpenAI 兼容的 LLM_API_URL 后接入真实文本/多模态 API。"}
 
     context_msg_records = context_message_records(scope_key(event))
-    messages = build_openai_messages(prompt, context_texts, build_context_message_note(context_msg_records), images, trigger_sender_id, system_prompt)
+    messages = build_openai_messages(prompt, context_texts, images, trigger_sender_id, system_prompt)
 
     headers = {"Authorization": f"Bearer {llm_key}"} if llm_key else {}
     tool_runtime = {
@@ -3761,4 +3762,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
