@@ -37,6 +37,9 @@ SEARCH_CACHE: dict[str, dict[str, Any]] = {}
 
 BANNED_AUTHORS: dict[str, str] = {
     "23115952": "",
+    "28028900": "",
+    "117094311": "",
+    "15897334": "",
 }
 
 
