@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TOOL_DESCRIPTION = "直接把 LLM 当前可见的一张或多张输入图片原样发到当前会话，可选择是否作为对指定上下文消息的回复发送，并可附带一段文字。仅适用于用户明确要求把上文某张/多张图直接发出来、转发出来、贴出来，或判断不需要生图/改图、只需要发送它能看到的非中间产物输入图片时。严禁发送 Pixiv 候选拼图、搜索候选列表拼图或任何工具中间产物，除非用户明确要求查看候选/拼图/列表；普通 Pixiv 搜图请求必须先用 pixiv_select_result 下载真实原图后再发送真实图。image_index/image_indexes 必须来自当前输入图片编号：图1 是第一张输入图片，图2 是第二张。调用成功后机器人已经完成本轮回答，不需要再输出普通文本。"
+TOOL_DESCRIPTION = "直接把 LLM 当前可见的一张或多张输入图片原样发到当前会话，可选择是否作为对指定上下文消息的回复发送，并可附带一段文字。当前输入图片按出现顺序编号，图1 是第一张输入图片，图2 是第二张；image_index/image_indexes 必须按这个顺序填写，不能自行重排。仅适用于用户明确要求把当前可见图片直接发出来、转发出来、贴出来，或判断不需要生图/改图、只需要发送它能看到的非中间产物输入图片时。默认优先使用触发者本人发送的图片；只有在明确回复他人消息、点名使用他人图片，或者用户明确要求跨发送者处理时，才可使用其他人的图片。严禁发送 Pixiv 候选拼图、搜索候选列表拼图或任何工具中间产物，除非用户明确要求查看候选/拼图/列表；普通 Pixiv 搜图请求必须先用 pixiv_select_result 下载真实原图后再发送真实图。调用成功后机器人已经完成本轮回答，不需要再输出普通文本。"
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -21,7 +21,7 @@ def definition(ctx: dict[str, Any]) -> dict[str, Any]:
                     },
                     "message_id": {
                         "type": "string",
-                        "description": "当 reply 为 true 时要回复的上下文消息 ID，必须来自最近可直接回复的上下文消息 ID 列表。reply 为 false 时省略或留空。",
+                        "description": "当 reply 为 true 时要回复的上下文消息 ID，必须来自当前上下文里带 message_id 的那条消息；reply 为 false 时省略或留空。",
                     },
                     "text": {
                         "type": "string",

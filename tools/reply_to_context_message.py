@@ -8,13 +8,13 @@ def definition(ctx: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "reply_to_context_message",
-            "description": "直接回复当前会话上下文中的某一条消息。可用于需要针对某人某条消息作答、纠正、补充、吐槽、解释、引用回答时。调用后机器人会把 answer 作为回复段发到指定 message_id 下方；如果此工具调用成功，就代表已经完成对用户的回答，不需要再输出普通文本。",
+            "description": "直接回复当前会话上下文中的某一条消息。可用于需要针对某人某条消息作答、纠正、补充、吐槽、解释、引用回答时。message_id 必须来自当前上下文里那条带 message_id 的消息，不能编造，也不能拿别的会话里的编号来用。调用后机器人会把 answer 作为回复段发到指定 message_id 下方；如果此工具调用成功，就代表已经完成对用户的回答，不需要再输出普通文本。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "message_id": {
                         "type": "string",
-                        "description": "要回复的上下文消息 ID。必须来自当前请求提供的上下文消息列表。",
+                        "description": "要回复的上下文消息 ID。必须来自当前上下文里带 message_id 的那条消息。",
                     },
                     "answer": {
                         "type": "string",

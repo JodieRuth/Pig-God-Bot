@@ -1511,14 +1511,10 @@ def build_image_context_note(images: list[dict[str, Any]], limit: int | None = N
     if not images:
         return "当前没有可用图片。"
     image_limit = MAX_CONTEXT_IMAGES if limit is None else max(1, int(limit))
-    lines = ["输入图片按消息/上下文时间顺序编号如下："]
+    lines = ["当前输入图片："]
     for index, record in enumerate(images[:image_limit], start=1):
         path = image_path(record)
-        lines.append(f"图{index} = 第 {index} 张输入图片，文件名 {path.name}，发送者 {image_sender_label(record)}")
-    lines.append("当用户提到图1、图2、第一张、第二张时，必须按这个编号理解；不要自行交换图片顺序。")
-    lines.append("默认规则：如果触发者本人没有明确要求引用别人发的图，优先只使用触发者本人发送的图片；只有在明确回复他人消息、点名使用他人图片、或用户强烈要求跨发送者编辑时，才可以使用其他人的图片。")
-    lines.append("如果需要直接回复某一条上下文消息，可以调用 reply_to_context_message，并使用最近上下文里标注的消息ID。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
-    lines.append("如果用户只是要求把你能看到的一张或多张输入图片直接发出来、转发出来、贴出来，或是需要你通过各种手段得到的图片，而不是生成或编辑图片，必须调用 send_visible_image，并传入是否回复、回复消息ID、文字和图片编号；多张图使用 image_indexes。该工具调用成功后代表已经完成回复，不要再输出普通文本。")
+        lines.append(f"图{index}：文件名 {path.name}，发送者 {image_sender_label(record)}")
     return "\n".join(lines)
 
 
@@ -1526,7 +1522,7 @@ def build_openai_messages(prompt: str, context_texts: list[str], images: list[di
     context = "\n".join(context_texts[-MAX_CONTEXT_MESSAGES:])
     image_note = build_image_context_note(images)
     if context:
-        user_text = f"最近群聊上下文（每条都已含 message_id，最后一条就是当前请求）：\n{context}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}\n\n请直接基于最后一条消息回答，必要时可用其中的 message_id 回复。"
+        user_text = f"最近群聊上下文（每条都已含 message_id）：\n{context}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}"
     else:
         user_text = f"当前请求：\n{prompt}\n\n触发者QQ：{trigger_sender_id}\n\n{image_note}"
     content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
@@ -1585,9 +1581,10 @@ def format_admin_users() -> str:
 def select_system_prompt(user_id: int, scope_key: str) -> str:
     reload_runtime_files()
     bot_info = f"当前Bot QQ: {BOT_QQ}，Bot名称: {BOT_NAME or '（未设置）'}"
+    response_instruction = "回答要求：请直接基于最后一条消息回答，必要时可用其中的 message_id 回复。"
     if is_admin_user(user_id):
-        return prompt_value("admin_system_prompt", scope_key).replace("{admin_users}", format_admin_users()) + "\n\n" + bot_info
-    return prompt_value("system_prompt", scope_key) + "\n\n" + bot_info
+        return prompt_value("admin_system_prompt", scope_key).replace("{admin_users}", format_admin_users()) + "\n\n" + bot_info + "\n\n" + response_instruction
+    return prompt_value("system_prompt", scope_key) + "\n\n" + bot_info + "\n\n" + response_instruction
 
 
 def select_tools(user_id: int) -> list[dict[str, Any]]:
@@ -1850,19 +1847,6 @@ async def call_text_llm(event: dict[str, Any], prompt: str, context_texts: list[
 async def call_chat_with_tools(event: dict[str, Any], prompt: str, context_texts: list[str], images: list[dict[str, Any]], trigger_sender_id: int, system_prompt: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
     return await call_chat_model(event, prompt, context_texts, images, trigger_sender_id, system_prompt, tools)
 
-
-
-def build_image_order_note(images: list[dict[str, Any]]) -> str:
-    if not images:
-        return ""
-    lines = ["输入图片按时间顺序编号如下，图1 最早，编号越大越新："]
-    for index, record in enumerate(images[:MAX_CONTEXT_IMAGES], start=1):
-        image = image_path(record)
-        lines.append(f"图{index} = 第 {index} 张输入图片，文件名 {image.name}，发送者 {image_sender_label(record)}")
-    lines.append("用户提到图1、图2、第一张、第二张时，必须按这个编号理解；不要自行交换图片顺序。")
-    lines.append("如果本次传入了多张参考图，而用户没有明确指定编号，请结合最近聊天上下文、用户当前请求、图片时间顺序和发送者信息，甄别真正应该用于生图的参考图片，通常优先使用与当前请求最相关、时间上最接近、由触发者本人发送或被明确点名的两张图片。")
-    lines.append("不要把无关的旧图强行混入画面；如果用户要求替换、合成或把图A内容应用到图B，要明确区分哪张是待编辑底图，哪张是参考主体/风格图。")
-    return "\n".join(lines)
 
 
 def image_api_url_for_mode(image_url: str, has_reference_images: bool) -> str:
@@ -2255,18 +2239,9 @@ async def call_image_api(prompt: str, context_texts: list[str], images: list[dic
 def select_llm_images(key: str, sender_id: int, current_images: list[dict[str, Any]], recent_images: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     if current_images:
         return current_images[:MAX_CONTEXT_IMAGES]
-    sender_images = visible_images_for_sender(key, sender_id)
-    if len(sender_images) >= MAX_CONTEXT_IMAGES:
-        return sender_images[:MAX_CONTEXT_IMAGES]
     if recent_images is None:
         _, recent_images = recent_context(key)
-    merged: list[dict[str, Any]] = []
-    for record in sender_images + recent_images:
-        if record not in merged:
-            merged.append(record)
-        if len(merged) >= MAX_CONTEXT_IMAGES:
-            break
-    return merged
+    return recent_images[:MAX_CONTEXT_IMAGES]
 
 
 def select_tool_images(images: list[dict[str, Any]], image_indexes: list[Any]) -> list[dict[str, Any]]:
