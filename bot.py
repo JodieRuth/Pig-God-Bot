@@ -451,7 +451,7 @@ build_scope_active_prompt()
 
 
 def reload_env_config(force: bool = False) -> bool:
-    global _env_mtime, ONEBOT_HTTP, ONEBOT_WS, ONEBOT_TOKEN, BOT_QQ, BOT_NAME, ADMIN_USERS, OPENAI_MODEL, IMAGE_MODEL, API_CONFIGS, DEBUG_LOG
+    global _env_mtime, ONEBOT_HTTP, ONEBOT_WS, ONEBOT_TOKEN, BOT_QQ, BOT_NAME, ADMIN_USERS, OPENAI_MODEL, IMAGE_MODEL, API_CONFIGS, DEBUG_LOG, LLM_DISABLED_MODELS, LLM_DISABLED_TOOL_NAMES, IMAGE_DISABLED_MODELS
     current_mtime = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0.0
     if not force and current_mtime == _env_mtime:
         return False
@@ -469,6 +469,9 @@ def reload_env_config(force: bool = False) -> bool:
         "llm": numbered_api_configs("LLM"),
         "image": numbered_api_configs("IMAGE"),
     }
+    LLM_DISABLED_MODELS = {m.strip().lower() for m in os.getenv("LLM_DISABLED_MODELS", "").split(",") if m.strip()}
+    LLM_DISABLED_TOOL_NAMES = {m.strip().lower() for m in os.getenv("LLM_DISABLED_TOOL_NAMES", "").split(",") if m.strip()}
+    IMAGE_DISABLED_MODELS = {m.strip().lower() for m in os.getenv("IMAGE_DISABLED_MODELS", "").split(",") if m.strip()}
     apply_env_active_state_to_runtime()
     DEBUG_LOG = os.getenv("DEBUG_LOG", "1") != "0"
     return True
@@ -632,6 +635,7 @@ LLM_RPM_LIMITER = RpmLimiter(LLM_MAX_RPM)
 IMAGE_API_RETRY_COUNT = int(os.getenv("IMAGE_API_RETRY_COUNT", "3"))
 IMAGE_API_RETRY_DELAY_SECONDS = int(os.getenv("IMAGE_API_RETRY_DELAY_SECONDS", "12"))
 LLM_DISABLED_MODELS: set[str] = {m.strip().lower() for m in os.getenv("LLM_DISABLED_MODELS", "").split(",") if m.strip()}
+LLM_DISABLED_TOOL_NAMES: set[str] = {m.strip().lower() for m in os.getenv("LLM_DISABLED_TOOL_NAMES", "").split(",") if m.strip()}
 IMAGE_DISABLED_MODELS: set[str] = {m.strip().lower() for m in os.getenv("IMAGE_DISABLED_MODELS", "").split(",") if m.strip()}
 DEBUG_LOG = os.getenv("DEBUG_LOG", "1") != "0"
 
@@ -673,6 +677,25 @@ def prompt_value(key: str, scope_key: str = "") -> str:
                 return file_content
         return value
     return str(value) if value else ""
+
+
+def tool_name_from_definition(tool: dict[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool, dict) else None
+    if isinstance(function, dict):
+        return str(function.get("name") or "").strip().lower()
+    return ""
+
+
+def is_tool_disabled_for_llm(tool_name: str) -> bool:
+    return str(tool_name or "").strip().lower() in LLM_DISABLED_TOOL_NAMES
+
+
+def visible_tool_definitions() -> list[dict[str, Any]]:
+    return [tool.copy() for tool in TOOL_DEFINITIONS if not is_tool_disabled_for_llm(tool_name_from_definition(tool))]
+
+
+def visible_tool_infos() -> list[dict[str, str]]:
+    return [item.copy() for item in TOOL_INFOS if not is_tool_disabled_for_llm(str(item.get("name") or ""))]
 
 
 contexts: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=MAX_CONTEXT_MESSAGES))
@@ -1589,7 +1612,7 @@ def select_system_prompt(user_id: int, scope_key: str) -> str:
 
 def select_tools(user_id: int) -> list[dict[str, Any]]:
     reload_runtime_files()
-    return [tool.copy() for tool in TOOL_DEFINITIONS]
+    return visible_tool_definitions()
 
 
 def normalize_tool_message_ids(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1662,7 +1685,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         "trigger_sender_id": trigger_sender_id,
         "system_prompt": system_prompt,
     }
-    tool_lookup = TOOL_EXECUTORS
+    tool_lookup = {name: executor for name, executor in TOOL_EXECUTORS.items() if not is_tool_disabled_for_llm(name)}
     terminal_tool_names = {"generate_image", "reply_to_context_message", "send_visible_image"}
 
     for _ in range(50):
@@ -2603,8 +2626,8 @@ def command_context() -> dict[str, Any]:
         "stop_searxng_server": stop_searxng_server,
         "scope_key": scope_key,
         "reload_runtime_files": reload_runtime_files,
-        "tool_infos": [item.copy() for item in TOOL_INFOS],
-        "tool_definitions": [tool.copy() for tool in TOOL_DEFINITIONS],
+        "tool_infos": visible_tool_infos(),
+        "tool_definitions": visible_tool_definitions(),
         "tools_temp_dir": TOOLS_TEMP_DIR,
         "clear_tools_temp_dir": clear_tools_temp_dir,
         "output_dir": OUTPUT_DIR,
