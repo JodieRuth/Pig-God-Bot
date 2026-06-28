@@ -976,7 +976,7 @@ def recent_context(key: str) -> tuple[list[str], list[dict[str, Any]]]:
         for record in reversed(item.get("images", [])):
             if len(images) < MAX_CONTEXT_IMAGES and image_path(record).exists():
                 images.append(record)
-    return list(reversed(texts[-MAX_CONTEXT_MESSAGES:])), list(reversed(images))
+    return texts[-MAX_CONTEXT_MESSAGES:], list(reversed(images))
 
 
 def format_elapsed(seconds: float) -> str:
