@@ -21,6 +21,8 @@ import aiohttp
 import websockets
 from dotenv import load_dotenv
 
+import bot_policy_state
+
 ROOT = Path(__file__).resolve().parent
 CACHE_ROOT = ROOT / "cache"
 CACHE_DIR = CACHE_ROOT / "images"
@@ -2430,7 +2432,8 @@ def command_help_text() -> str:
     for usage, description in sorted(COMMAND_HELP.items()):
         lines.append(f"{usage} - {description}")
     lines.append("/plugins - 查看和管理群插件。")
-    lines.append("\n群聊中所有指令和对话都必须先 @ 我，再接命令或触发词。")
+    lines.append("\n群聊中普通用户的指令和对话必须先 @ 我，再接命令或触发词。")
+    lines.append("环境变量管理员和 OP 用户可直接执行 / 开头的指令。")
     lines.append("支持 @QQ号、@当前群名片或 @Pig god 等机器人识别到的艾特形式。")
     return "\n".join(lines)
 
@@ -2595,8 +2598,13 @@ def command_context() -> dict[str, Any]:
         "command_help_items": COMMAND_HELP,
         "command_handlers": COMMAND_HANDLERS,
         "command_aliases": COMMAND_ALIASES,
+        "canonical_command_name": canonical_command_name,
+        "set_command_enabled_for_scope": bot_policy_state.set_command_enabled,
+        "set_operator_user": bot_policy_state.set_operator_user,
+        "operator_user_ids": bot_policy_state.operator_user_ids,
         "plugin_help_text": plugin_help_text,
         "plugin_enabled_for_event": plugin_enabled_for_event,
+        "set_plugin_enabled_for_scope": set_plugin_enabled_for_scope,
         "plugins": PLUGINS,
         "log": log,
         "api_configs": API_CONFIGS,
@@ -2773,6 +2781,24 @@ def load_commands() -> tuple[dict[str, str], dict[str, Any], dict[str, list[str]
 
 
 COMMAND_HELP, COMMAND_HANDLERS, COMMAND_ALIASES = load_commands()
+
+
+def canonical_command_name(command_name: str) -> str | None:
+    raw_name = command_name.strip().lower()
+    if not raw_name:
+        return None
+    lookup_names = {raw_name}
+    if not raw_name.startswith("/"):
+        lookup_names.add(f"/{raw_name}")
+    if "/plugins" in lookup_names:
+        return "/plugins"
+    for canonical_name, aliases in COMMAND_ALIASES.items():
+        if canonical_name in lookup_names:
+            return canonical_name
+        for alias in aliases:
+            if alias in lookup_names or alias == raw_name:
+                return canonical_name
+    return None
 
 
 async def zhubi_idle_tick_loop() -> None:
@@ -2985,6 +3011,25 @@ def load_plugins() -> dict[str, dict[str, Any]]:
 PLUGINS = load_plugins()
 
 
+def set_plugin_enabled_for_scope(plugin_name: str, scope: str, scope_id: int, enabled: bool) -> bool:
+    plugin = PLUGINS[plugin_name]
+    subscriptions = plugin.get("subscriptions", {"groups": set(), "private_users": set()})
+    subscriptions.setdefault("groups", set())
+    subscriptions.setdefault("private_users", set())
+    target_values = subscriptions[scope]
+    target_id = int(scope_id)
+    before = target_id in target_values
+    if enabled:
+        target_values.add(target_id)
+    else:
+        target_values.discard(target_id)
+    plugin["subscriptions"] = subscriptions
+    if before == enabled:
+        return False
+    save_plugin_subscriptions(plugin_name, subscriptions)
+    return True
+
+
 def plugin_help_text(event: dict[str, Any] | None = None, include_description: bool = True) -> str:
     lines = ["插件指令：", "/plugins - 查看插件列表", "/plugins enable 插件名 - 在当前聊天开启插件", "/plugins disable 插件名 - 在当前聊天关闭插件"]
     if PLUGINS:
@@ -3060,6 +3105,12 @@ async def handle_command(event: dict[str, Any], text: str) -> bool:
     command = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
     log(f"Command received: {command} arg={arg!r} from user={event.get('user_id')}")
+
+    canonical_name = canonical_command_name(command) or command
+    scope, scope_id = chat_subscription_key(event)
+    if not bot_policy_state.command_is_enabled(canonical_name, scope, scope_id):
+        await reply(event, f"命令 {canonical_name} 在当前聊天已被禁用。")
+        return True
 
     if command == "/plugins":
         await handle_plugin_command(event, arg)
@@ -3164,9 +3215,12 @@ async def handle_event(event: dict[str, Any]) -> None:
                 log(f"Dispatching group help command: {normalized_text[:100]!r}")
                 await handle_command(event, normalized_text)
                 return
-            admin_slash_command = is_admin_user(int(event.get("user_id", 0))) and normalized_text.startswith("/")
-            if admin_slash_command:
-                log(f"Dispatching group admin command without mention: {normalized_text[:100]!r}")
+            privileged_slash_command = (
+                is_admin_user(int(event.get("user_id", 0)))
+                or bot_policy_state.is_operator_user(int(event.get("user_id", 0)))
+            ) and normalized_text.startswith("/")
+            if privileged_slash_command:
+                log(f"Dispatching privileged group command without mention: {normalized_text[:100]!r}")
                 await handle_command(event, normalized_text)
                 return
             if not at_bot and not reply_to_bot:

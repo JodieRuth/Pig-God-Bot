@@ -36,7 +36,8 @@ def command_help_forward_lines(ctx: dict[str, Any]) -> list[str]:
     lines.append("/plugins - 查看和管理群插件。")
     lines = chunked_forward_lines(lines)
     lines.append("")
-    lines.append("群聊中所有指令和对话都必须先 @ 我，再接命令或触发词。")
+    lines.append("群聊中普通用户的指令和对话必须先 @ 我，再接命令或触发词。")
+    lines.append("机器人管理员和 OP 用户可直接执行 / 开头的指令。")
     lines.append("支持 @QQ号、@当前群名片或 @Pig god 等机器人识别到的艾特形式。")
     return lines
 

@@ -11,9 +11,35 @@ def parse_args(arg: str) -> tuple[str, str] | None:
         return None
     kind = parts[0].lower()
     value = parts[1].strip()
-    if kind not in {"llm", "image", "prompt", "photo", "stream", "retry"} or not value:
+    if kind not in {"llm", "image", "prompt", "photo", "stream", "retry", "command", "plugin"} or not value:
         return None
     return kind, value
+
+
+def parse_policy_switch(value: str) -> tuple[str, bool, int | None] | None:
+    parts = value.split()
+    if len(parts) not in {2, 3}:
+        return None
+    target_name = parts[0].strip().lower()
+    action = parts[1].strip().lower()
+    if not target_name or action not in {"enable", "disable"}:
+        return None
+    target_user_id: int | None = None
+    if len(parts) == 3:
+        if not parts[2].isdigit() or int(parts[2]) <= 0:
+            return None
+        target_user_id = int(parts[2])
+    return target_name, action == "enable", target_user_id
+
+
+def policy_scope(event: dict[str, Any], target_user_id: int | None) -> tuple[str, int, str]:
+    if target_user_id is not None:
+        return "private_users", target_user_id, f"QQ {target_user_id} 的私聊"
+    if event.get("message_type") == "group":
+        group_id = int(event.get("group_id", 0))
+        return "groups", group_id, f"群 {group_id}"
+    user_id = int(event.get("user_id", 0))
+    return "private_users", user_id, f"QQ {user_id} 的私聊"
 
 
 def models_url_for_request(url: str) -> str:
@@ -92,9 +118,35 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         return
     parsed = parse_args(arg)
     if parsed is None:
-        await ctx["reply"](event, "用法：/switch llm <modelname[#N]>、/switch image <modelname[#N]>、/switch prompt <编号或名称>、/switch photo true|false|<工具轮图片上限>、/switch stream true|false 或 /switch retry <次数>")
+        await ctx["reply"](event, "用法：/switch llm <modelname[#N]>、/switch image <modelname[#N]>、/switch prompt <编号或名称>、/switch photo true|false|<工具轮图片上限>、/switch stream true|false、/switch retry <次数> 或 /switch command|plugin <名称> enable|disable [QQ号]")
         return
     kind, value = parsed
+    if kind in {"command", "plugin"}:
+        policy_switch = parse_policy_switch(value)
+        if policy_switch is None:
+            await ctx["reply"](event, f"用法：/switch {kind} <名称> enable|disable [QQ号]")
+            return
+        target_name, enabled, target_user_id = policy_switch
+        scope, scope_id, scope_label = policy_scope(event, target_user_id)
+        if kind == "command":
+            canonical_name = ctx["canonical_command_name"](target_name)
+            if canonical_name is None:
+                await ctx["reply"](event, f"未找到命令 {target_name}。")
+                return
+            changed = ctx["set_command_enabled_for_scope"](canonical_name, scope, scope_id, enabled)
+            status = "启用" if enabled else "禁用"
+            message = f"已在{scope_label}{status}命令 {canonical_name}。" if changed else f"命令 {canonical_name} 在{scope_label}已经是{status}状态。"
+            await ctx["reply"](event, message)
+            return
+        plugin_name = target_name.removeprefix("/")
+        if plugin_name not in ctx["plugins"]:
+            await ctx["reply"](event, f"未找到插件 {plugin_name}。")
+            return
+        changed = ctx["set_plugin_enabled_for_scope"](plugin_name, scope, scope_id, enabled)
+        status = "启用" if enabled else "禁用"
+        message = f"已在{scope_label}{status}插件 {plugin_name}。" if changed else f"插件 {plugin_name} 在{scope_label}已经是{status}状态。"
+        await ctx["reply"](event, message)
+        return
     if kind == "photo":
         normalized = value.lower()
         if value.isdigit():
@@ -222,7 +274,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 
 COMMAND = {
     "name": "/switch",
-    "usage": "/switch llm/image <modelname[#N]>、/switch prompt <编号或名称>、/switch photo true|false|<工具轮图片上限>、/switch stream true|false 或 /switch retry <次数>",
-    "description": "仅所有者可用：切换当前使用的 LLM、图片 API、prompt、图片输入开关、LLM 工具轮图片上限、流式传输开关或上游错误重试次数。",
+    "usage": "/switch llm/image <modelname[#N]>、/switch prompt <编号或名称>、/switch photo true|false|<工具轮图片上限>、/switch stream true|false、/switch retry <次数>、/switch command|plugin <名称> enable|disable [QQ号]",
+    "description": "仅管理员可用：切换运行时设置，或按当前群/私聊 QQ 启用和禁用命令、插件。",
     "handler": handler,
 }

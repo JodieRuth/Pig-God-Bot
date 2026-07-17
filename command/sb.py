@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import bot_policy_state
+
 DATA_FILE = Path(__file__).with_name("sb.json")
 
 
@@ -77,6 +79,33 @@ def parse_id(text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def item_fingerprint(item: dict[str, Any]) -> str:
+    return bot_policy_state.text_content_fingerprint(str(item.get("text") or ""))
+
+
+async def send_item(
+    event: dict[str, Any],
+    item: dict[str, Any],
+    ctx: dict[str, Any],
+    allow_duplicate: bool = False,
+) -> None:
+    result = bot_policy_state.claim_content_usage(
+        int(event.get("user_id", 0)),
+        item_fingerprint(item),
+        allow_duplicate=allow_duplicate,
+    )
+    if result.reason == "duplicate":
+        await ctx["reply"](event, f"#{item['id']} 今天已经发送过，明天重置后可以再次发送。")
+        return
+    if result.reason == "hourly_limit":
+        await ctx["reply"](event, "你在最近一小时内已使用 /sb 和 /sbt 共 12 次，请稍后再试。")
+        return
+    if result.reason == "daily_limit":
+        await ctx["reply"](event, "你今天已使用 /sb 和 /sbt 共 60 次，明天重置后可以继续使用。")
+        return
+    await ctx["reply"](event, f"#{item['id']} {item['text']}")
+
+
 async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     items, _ = load_items()
     if not items:
@@ -88,7 +117,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         if target_id is not None:
             for item in items:
                 if int(item.get("id", 0)) == target_id:
-                    await ctx["reply"](event, f"#{item['id']} {item['text']}")
+                    await send_item(event, item, ctx, allow_duplicate=True)
                     return
             await ctx["reply"](event, f"不存在编号 #{target_id}。")
             return
@@ -97,16 +126,19 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
         if not matched:
             await ctx["reply"](event, f"没有找到包含“{query}”的内容。")
             return
-        item = random.choice(matched)
-        await ctx["reply"](event, f"#{item['id']} {item['text']}")
+        await send_item(event, random.choice(matched), ctx, allow_duplicate=True)
         return
-    item = random.choice(items)
-    await ctx["reply"](event, f"#{item['id']} {item['text']}")
+    sent_content = bot_policy_state.sent_content_fingerprints()
+    available = [item for item in items if item_fingerprint(item) not in sent_content]
+    if not available:
+        await ctx["reply"](event, "今天所有 /sb 内容都已经发送过，明天重置后可以再次发送。")
+        return
+    await send_item(event, random.choice(available), ctx)
 
 
 COMMAND = {
     "name": "/sb",
     "usage": "/sb [#编号|关键词]",
-    "description": "从 /sb_s 保存的内容中随机抽取一条；可指定编号，或按关键词匹配后随机抽取。",
+    "description": "随机抽取今日未发送的内容，指定编号或关键词可重复；/sb 与 /sbt 每个 QQ 每小时共 12 次、每天共 60 次。",
     "handler": handler,
 }
