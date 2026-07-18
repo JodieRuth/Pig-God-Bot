@@ -22,6 +22,10 @@ command/quote/img/
 command/quote/data.json
 command/zhubi/data.json
 command/mcserver/data.json
+command/rp.json
+command/rp_images/
+command/rpp.json
+command/rpp_images/
 plugins/*.json
 bin/
 obj/

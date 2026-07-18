@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
-COMMON_MODULE = Path(__file__).with_name("sbt_common.py")
+COMMON_MODULE = Path(__file__).with_name("_image_pool_common.py")
 spec = importlib.util.spec_from_file_location("local_onebot_sbt_common_r", COMMON_MODULE)
 if spec is None or spec.loader is None:
     raise RuntimeError("无法加载 sbt 数据模块")

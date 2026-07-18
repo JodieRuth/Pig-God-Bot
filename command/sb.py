@@ -98,10 +98,10 @@ async def send_item(
         await ctx["reply"](event, f"#{item['id']} 今天已经发送过，明天重置后可以再次发送。")
         return
     if result.reason == "hourly_limit":
-        await ctx["reply"](event, "你在最近一小时内已使用 /sb 和 /sbt 共 12 次，请稍后再试。")
+        await ctx["reply"](event, "你在最近一小时内已使用 /sb、/sbt、/rp 和 /rpp 共 12 次，请稍后再试。")
         return
     if result.reason == "daily_limit":
-        await ctx["reply"](event, "你今天已使用 /sb 和 /sbt 共 60 次，明天重置后可以继续使用。")
+        await ctx["reply"](event, "你今天已使用 /sb、/sbt、/rp 和 /rpp 共 60 次，明天重置后可以继续使用。")
         return
     await ctx["reply"](event, f"#{item['id']} {item['text']}")
 
@@ -139,6 +139,6 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
 COMMAND = {
     "name": "/sb",
     "usage": "/sb [#编号|关键词]",
-    "description": "随机抽取今日未发送的内容，指定编号或关键词可重复；/sb 与 /sbt 每个 QQ 每小时共 12 次、每天共 60 次。",
+    "description": "随机抽取今日未发送的内容，指定编号或关键词可重复；与 /sbt、/rp、/rpp 共用个人限额。",
     "handler": handler,
 }

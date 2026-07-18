@@ -241,6 +241,7 @@ def text_content_fingerprint(text: str) -> str:
     return f"sb:{hashlib.sha256(normalized).hexdigest()}"
 
 
-def image_content_fingerprint(md5_value: str) -> str:
+def image_content_fingerprint(md5_value: str, pool_name: str = "sbt") -> str:
     normalized = md5_value.strip().lower()
-    return f"sbt:{normalized}" if normalized else ""
+    namespace = pool_name.strip().lower() or "sbt"
+    return f"{namespace}:{normalized}" if normalized else ""

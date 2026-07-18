@@ -9,8 +9,15 @@ from typing import Any
 
 import aiohttp
 
-DATA_FILE = Path(__file__).with_name("sbt.json")
-IMAGE_DIR = Path(__file__).with_name("sbt_images")
+POOL_ROOT = Path(__file__).resolve().parent
+
+
+def pool_data_file(pool_name: str) -> Path:
+    return POOL_ROOT / f"{pool_name}.json"
+
+
+def pool_image_dir(pool_name: str) -> Path:
+    return POOL_ROOT / f"{pool_name}_images"
 
 
 def normalize_data(data: Any) -> tuple[list[dict[str, Any]], int, bool]:
@@ -72,23 +79,24 @@ def normalize_data(data: Any) -> tuple[list[dict[str, Any]], int, bool]:
     return items, next_id, changed
 
 
-def save_items(items: list[dict[str, Any]], next_id: int) -> None:
-    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    with DATA_FILE.open("w", encoding="utf-8") as f:
+def save_items(items: list[dict[str, Any]], next_id: int, pool_name: str = "sbt") -> None:
+    pool_image_dir(pool_name).mkdir(parents=True, exist_ok=True)
+    with pool_data_file(pool_name).open("w", encoding="utf-8") as f:
         json.dump({"next_id": next_id, "items": items}, f, ensure_ascii=False, indent=2)
 
 
-def load_items() -> tuple[list[dict[str, Any]], int]:
-    if not DATA_FILE.exists():
+def load_items(pool_name: str = "sbt") -> tuple[list[dict[str, Any]], int]:
+    data_file = pool_data_file(pool_name)
+    if not data_file.exists():
         return [], 1
     try:
-        with DATA_FILE.open("r", encoding="utf-8") as f:
+        with data_file.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
         return [], 1
     items, next_id, changed = normalize_data(data)
     if changed:
-        save_items(items, next_id)
+        save_items(items, next_id, pool_name)
     return items, next_id
 
 
@@ -150,25 +158,26 @@ def suffix_from_bytes(data: bytes, content_type: str = "", fallback: str = "") -
     return suffix if suffix else ".png"
 
 
-def copy_image(source: Path, item_id: int, sender_id: Any = None, saved_at: datetime | None = None) -> Path:
-    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+def copy_image(source: Path, item_id: int, sender_id: Any = None, saved_at: datetime | None = None, pool_name: str = "sbt") -> Path:
+    image_dir = pool_image_dir(pool_name)
+    image_dir.mkdir(parents=True, exist_ok=True)
     data = source.read_bytes()
     suffix = suffix_from_bytes(data, fallback=source.name)
-    target = IMAGE_DIR / f"{stored_image_stem(item_id, sender_id, saved_at)}{suffix}"
+    target = image_dir / f"{stored_image_stem(item_id, sender_id, saved_at)}{suffix}"
     target.write_bytes(data)
     return target
 
 
-async def save_image_ref(value: str, item_id: int, sender_id: Any = None, saved_at: datetime | None = None) -> Path | None:
+async def save_image_ref(value: str, item_id: int, sender_id: Any = None, saved_at: datetime | None = None, pool_name: str = "sbt") -> Path | None:
     text = str(value or "").strip()
     if not text:
         return None
     if text.startswith("file://"):
         path = Path(text.removeprefix("file:///").removeprefix("file://"))
-        return copy_image(path, item_id, sender_id, saved_at) if path.exists() else None
+        return copy_image(path, item_id, sender_id, saved_at, pool_name) if path.exists() else None
     path = Path(text)
     if path.exists():
-        return copy_image(path, item_id, sender_id, saved_at)
+        return copy_image(path, item_id, sender_id, saved_at, pool_name)
     if not text.startswith(("http://", "https://")):
         return None
     async with aiohttp.ClientSession() as session:
@@ -176,8 +185,9 @@ async def save_image_ref(value: str, item_id: int, sender_id: Any = None, saved_
             resp.raise_for_status()
             data = await resp.read()
             suffix = suffix_from_bytes(data, resp.headers.get("content-type", ""), text)
-    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    target = IMAGE_DIR / f"{stored_image_stem(item_id, sender_id, saved_at)}{suffix}"
+    image_dir = pool_image_dir(pool_name)
+    image_dir.mkdir(parents=True, exist_ok=True)
+    target = image_dir / f"{stored_image_stem(item_id, sender_id, saved_at)}{suffix}"
     target.write_bytes(data)
     return target
 
@@ -205,7 +215,7 @@ def message_image_refs(message: list[dict[str, Any]]) -> list[str]:
     return refs
 
 
-async def save_image_segment(seg: dict[str, Any], item_id: int, ctx: dict[str, Any], sender_id: Any = None, saved_at: datetime | None = None) -> Path | None:
+async def save_image_segment(seg: dict[str, Any], item_id: int, ctx: dict[str, Any], sender_id: Any = None, saved_at: datetime | None = None, pool_name: str = "sbt") -> Path | None:
     data = seg.get("data", {}) if isinstance(seg.get("data"), dict) else {}
     file_value = data.get("file")
     if file_value and callable(ctx.get("onebot_post")):
@@ -219,7 +229,7 @@ async def save_image_segment(seg: dict[str, Any], item_id: int, ctx: dict[str, A
                 if not value:
                     continue
                 try:
-                    saved = await save_image_ref(str(value), item_id, sender_id, saved_at)
+                    saved = await save_image_ref(str(value), item_id, sender_id, saved_at, pool_name)
                 except Exception:
                     saved = None
                 if saved is not None:
@@ -229,7 +239,7 @@ async def save_image_segment(seg: dict[str, Any], item_id: int, ctx: dict[str, A
         if not value:
             continue
         try:
-            saved = await save_image_ref(str(value), item_id, sender_id, saved_at)
+            saved = await save_image_ref(str(value), item_id, sender_id, saved_at, pool_name)
         except Exception:
             saved = None
         if saved is not None:
@@ -237,10 +247,10 @@ async def save_image_segment(seg: dict[str, Any], item_id: int, ctx: dict[str, A
     return None
 
 
-async def save_first_image_from_message(message: list[dict[str, Any]], item_id: int, ctx: dict[str, Any], sender_id: Any = None, saved_at: datetime | None = None) -> Path | None:
+async def save_first_image_from_message(message: list[dict[str, Any]], item_id: int, ctx: dict[str, Any], sender_id: Any = None, saved_at: datetime | None = None, pool_name: str = "sbt") -> Path | None:
     for seg in message:
         if isinstance(seg, dict) and is_image_like_segment(seg):
-            saved = await save_image_segment(seg, item_id, ctx, sender_id, saved_at)
+            saved = await save_image_segment(seg, item_id, ctx, sender_id, saved_at, pool_name)
             if saved is not None:
                 return saved
     return None
@@ -304,33 +314,33 @@ def has_reply_segment(message: list[dict[str, Any]]) -> bool:
     return any(isinstance(seg, dict) and seg.get("type") == "reply" for seg in message)
 
 
-async def save_source_image(event: dict[str, Any], ctx: dict[str, Any], item_id: int) -> Path | None:
+async def save_source_image(event: dict[str, Any], ctx: dict[str, Any], item_id: int, pool_name: str = "sbt") -> Path | None:
     sender_id = event.get("user_id")
     saved_at = datetime.now()
     message = event.get("message") if isinstance(event.get("message"), list) else []
     replied = event.get("reply")
     is_reply_command = has_reply_segment(message) or isinstance(replied, dict)
     if not is_reply_command:
-        saved = await save_first_image_from_message(message, item_id, ctx, sender_id, saved_at)
+        saved = await save_first_image_from_message(message, item_id, ctx, sender_id, saved_at, pool_name)
         if saved is not None:
             return saved
         current = cached_image_from_event(event, "current_images")
         if current is not None:
-            return copy_image(current, item_id, sender_id, saved_at)
+            return copy_image(current, item_id, sender_id, saved_at, pool_name)
     if isinstance(replied, dict):
         replied_segments = replied.get("message") if isinstance(replied.get("message"), list) else []
-        saved = await save_first_image_from_message(replied_segments, item_id, ctx, sender_id, saved_at)
+        saved = await save_first_image_from_message(replied_segments, item_id, ctx, sender_id, saved_at, pool_name)
         if saved is not None:
             return saved
     replied_cached = cached_image_from_event(event, "replied_images")
     if replied_cached is not None:
-        return copy_image(replied_cached, item_id, sender_id, saved_at)
+        return copy_image(replied_cached, item_id, sender_id, saved_at, pool_name)
     if is_reply_command:
-        saved = await save_first_image_from_message(message, item_id, ctx, sender_id, saved_at)
+        saved = await save_first_image_from_message(message, item_id, ctx, sender_id, saved_at, pool_name)
         if saved is not None:
             return saved
         return None
     latest = latest_sender_image(event, ctx)
     if latest and latest.exists():
-        return copy_image(latest, item_id, sender_id, saved_at)
+        return copy_image(latest, item_id, sender_id, saved_at, pool_name)
     return None

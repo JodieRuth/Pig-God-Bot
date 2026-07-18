@@ -2592,6 +2592,7 @@ def command_context() -> dict[str, Any]:
         "onebot_post": onebot_post,
         "is_controller": is_controller,
         "is_admin_event": lambda event: is_admin_user(int(event.get("user_id", 0))),
+        "is_operator_event": lambda event: bot_policy_state.is_operator_user(int(event.get("user_id", 0))),
         "jobs": jobs,
         "bot_state": bot_state,
         "command_help_text": command_help_text,
