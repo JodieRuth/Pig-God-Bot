@@ -355,15 +355,48 @@ def _webview2_source_fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolve_dotnet_path() -> str:
+    candidates = [
+        os.getenv("ANIMETRACE_DOTNET_PATH"),
+        os.getenv("DOTNET_HOST_PATH"),
+        shutil.which("dotnet"),
+    ]
+    for root_name in ("DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_ROOT(x86)"):
+        dotnet_root = os.getenv(root_name)
+        if dotnet_root:
+            candidates.append(str(Path(dotnet_root) / ("dotnet.exe" if os.name == "nt" else "dotnet")))
+    if os.name == "nt":
+        candidates.extend(
+            [
+                str(Path(os.getenv("ProgramFiles", r"C:\Program Files")) / "dotnet" / "dotnet.exe"),
+                str(Path(os.getenv("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "dotnet" / "dotnet.exe"),
+            ]
+        )
+    for candidate in candidates:
+        text = os.path.expandvars(str(candidate or "").strip())
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        if path.is_file():
+            return str(path.resolve())
+        located = shutil.which(text)
+        if located:
+            return str(Path(located).resolve())
+    return ""
+
+
 def _build_webview2_host(root: Path) -> str:
     project = root / C_SHARP_ROOT / "browser_automation_host.csproj"
     if not project.exists():
         return "WebView2 宿主项目不存在"
+    dotnet_path = _resolve_dotnet_path()
+    if not dotnet_path:
+        return "未找到 .NET SDK 或 dotnet.exe，AnimeTrace 将自动使用 Playwright"
     try:
         env = os.environ.copy()
         env["DOTNET_CLI_UI_LANGUAGE"] = "zh-CN"
         result = subprocess.run(
-            ["dotnet", "build", str(project), "-c", "Release"],
+            [dotnet_path, "build", str(project), "-c", "Release"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -523,7 +556,7 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     await ctx["reply"](event, "正在构建 WebView2 浏览器宿主...")
     webview2_build_error = _build_webview2_host(bot_root)
     if webview2_build_error:
-        await ctx["reply"](event, f"WebView2 浏览器宿主构建失败，将继续重启 bot：{webview2_build_error}")
+        await ctx["reply"](event, f"WebView2 浏览器宿主未就绪，将继续重启 bot；AnimeTrace 会自动使用 Playwright：{webview2_build_error}")
     else:
         await ctx["reply"](event, "WebView2 浏览器宿主已构建完成。")
 
@@ -542,6 +575,9 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     if callable(clear_tools_temp_dir):
         clear_tools_temp_dir()
     ctx["bot_state"]["stopped"] = True
+    stop_drawing_gateway_tunnel = ctx.get("stop_drawing_gateway_tunnel")
+    if callable(stop_drawing_gateway_tunnel):
+        await stop_drawing_gateway_tunnel()
     stop_vndb_json_server = ctx.get("stop_vndb_json_server")
     if callable(stop_vndb_json_server):
         await stop_vndb_json_server()

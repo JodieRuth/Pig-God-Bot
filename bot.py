@@ -22,6 +22,7 @@ import websockets
 from dotenv import load_dotenv
 
 import bot_policy_state
+from drawing_gateway_tunnel_runtime import DrawingGatewayTunnelLifecycle
 
 ROOT = Path(__file__).resolve().parent
 ENV_FILE = ROOT / ".env"
@@ -732,6 +733,21 @@ def log(message: str) -> None:
         console_log(message)
 
 
+DRAWING_GATEWAY_TUNNEL_LIFECYCLE = DrawingGatewayTunnelLifecycle(
+    ROOT,
+    ENV_FILE,
+    log,
+)
+
+
+async def start_drawing_gateway_tunnel() -> tuple[bool, str]:
+    return await DRAWING_GATEWAY_TUNNEL_LIFECYCLE.start()
+
+
+async def stop_drawing_gateway_tunnel() -> None:
+    await DRAWING_GATEWAY_TUNNEL_LIFECYCLE.stop()
+
+
 def mask_secret(value: str) -> str:
     if not value:
         return ""
@@ -787,7 +803,7 @@ def tool_result_for_log(tool_name: str, result: dict[str, Any]) -> dict[str, Any
     }:
         return result
     redacted = {key: value for key, value in result.items() if key != "content"}
-    redacted["content"] = "<temporary image credentials omitted>"
+    redacted["content"] = "<drawing generation result omitted>"
     return redacted
 
 
@@ -1669,8 +1685,9 @@ def select_system_prompt(user_id: int, scope_key: str) -> str:
         "同一请求只能选择一套生图工具，不得同时调用。"
         "使用本地模型时，先调用 drawing_search_loras，再调用 drawing_prompt_suggestions；已安装目录没有所需 LoRA 时才调用 drawing_search_civitai，"
         "下载仅限管理员，下载后用 drawing_download_status 等待成功并重新调用 drawing_search_loras 获取精确 managed identifier，然后才能调用 drawing_generate_image。"
-        "LoRA 只能通过 loras 参数传入，不能把 LoRA 语法写进 prompt；本地任务提交成功后会立即回复 job id，并在后台监控，完成后主动通知。"
-        "不得因为没有即时图片而重复提交；用户主动追问或机器人重启后，使用原 job id 调用 drawing_generation_status。"
+        "LoRA 只能通过 loras 参数传入，不能把 LoRA 语法写进 prompt；本地任务提交成功后只回复机器人生成的八位任务 ID 和正在生成，完成后只发送图片链接。"
+        "不得公开网关 job id、排队位置、密码、到期时间、seed、生成参数或内部等待方式；不得因为没有即时图片而重复提交。"
+        "用户主动追问时使用八位任务 ID 调用 drawing_generation_status；管理员可用 /status <八位任务 ID> 停止等待，停止后不再发送结果，机器人重启前的任务 ID 无法恢复。"
     )
     if is_admin_user(user_id):
         base_prompt = prompt_value("admin_system_prompt", scope_key).replace("{admin_users}", format_admin_users())
@@ -2612,6 +2629,7 @@ async def force_reset_searxng_server() -> None:
 
 
 async def force_reset_managed_services() -> None:
+    await stop_drawing_gateway_tunnel()
     await stop_vndb_json_server()
     await force_reset_searxng_server()
     if os.name == "nt":
@@ -2698,6 +2716,7 @@ def command_context() -> dict[str, Any]:
         "current_context_count": current_context_count,
         "clear_current_context": clear_current_context,
         "reboot_process": reboot_process,
+        "stop_drawing_gateway_tunnel": stop_drawing_gateway_tunnel,
         "stop_vndb_json_server": stop_vndb_json_server,
         "stop_searxng_server": stop_searxng_server,
         "scope_key": scope_key,
@@ -3409,12 +3428,26 @@ async def send_pending_update_message(data: dict[str, Any], text: str, remove_pe
         (ROOT / ".pending_update.json").unlink(missing_ok=True)
 
 
-async def report_startup_service_statuses(data: dict[str, Any], searxng_task: asyncio.Task[tuple[bool, str]], vndb_task: asyncio.Task[tuple[bool, str]]) -> None:
-    results = await asyncio.gather(searxng_task, vndb_task, return_exceptions=True)
+async def report_startup_service_statuses(
+    data: dict[str, Any],
+    searxng_task: asyncio.Task[tuple[bool, str]],
+    vndb_task: asyncio.Task[tuple[bool, str]],
+    drawing_gateway_tunnel_task: asyncio.Task[tuple[bool, str]],
+) -> None:
+    results = await asyncio.gather(
+        searxng_task,
+        vndb_task,
+        drawing_gateway_tunnel_task,
+        return_exceptions=True,
+    )
     lines = ["工具服务初始化状态："]
-    names = ["SearXNG web_search", "VNDB JSON Server"]
+    names = [
+        "SearXNG web_search",
+        "VNDB JSON Server",
+        "Drawing Gateway SSH Tunnel",
+    ]
     for name, result in zip(names, results):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             lines.append(f"{name}：失败，{exception_detail(result)}")
         else:
             ok, detail = result
@@ -3938,6 +3971,9 @@ async def main() -> None:
     pending_update = await _load_pending_update()
     searxng_task = asyncio.create_task(start_searxng_server())
     vndb_task = asyncio.create_task(start_vndb_json_server())
+    drawing_gateway_tunnel_task = asyncio.create_task(
+        start_drawing_gateway_tunnel()
+    )
     try:
         module_path = COMMAND_DIR / "zhubi_ext_common.py"
         if module_path.exists():
@@ -3966,7 +4002,14 @@ async def main() -> None:
                         await send_pending_update_message(pending_update, pending_message, remove_pending_file=True)
                         pending_update_reported = True
                         if pending_update.get("kind") != "restart" or pending_update.get("report_services"):
-                            service_status_report_task = asyncio.create_task(report_startup_service_statuses(pending_update, searxng_task, vndb_task))
+                            service_status_report_task = asyncio.create_task(
+                                report_startup_service_statuses(
+                                    pending_update,
+                                    searxng_task,
+                                    vndb_task,
+                                    drawing_gateway_tunnel_task,
+                                )
+                            )
                     async for raw in ws:
                         try:
                             event = json.loads(raw)
@@ -3983,6 +4026,7 @@ async def main() -> None:
     finally:
         if service_status_report_task is not None and not service_status_report_task.done():
             service_status_report_task.cancel()
+        await stop_drawing_gateway_tunnel()
         await stop_vndb_json_server()
         await stop_searxng_server()
 

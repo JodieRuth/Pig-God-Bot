@@ -26,6 +26,7 @@ SSH_ENVIRONMENT_KEYS = (
     "DRAWING_GATEWAY_SSH_REMOTE_PORT",
     "DRAWING_GATEWAY_SSH_KNOWN_HOSTS_PATH",
     "DRAWING_GATEWAY_SSH_BIN",
+    "DRAWING_GATEWAY_SSH_CONNECT_TIMEOUT_SECONDS",
 )
 PASSTHROUGH_ENVIRONMENT_KEYS = (
     "PATH",
@@ -66,6 +67,7 @@ class DrawingGatewayTunnelConfig:
     remote_host: str
     remote_port: int
     known_hosts_path: Path | None
+    connect_timeout_seconds: int
 
 
 class TunnelConfigurationError(RuntimeError):
@@ -124,6 +126,23 @@ def port_value(
         raise TunnelConfigurationError(f"{key} 必须是整数。") from exc
     if not 1 <= value <= 65535:
         raise TunnelConfigurationError(f"{key} 必须在 1 到 65535 之间。")
+    return value
+
+
+def duration_seconds_value(
+    values: Mapping[str, str],
+    key: str,
+    default: int,
+) -> int:
+    raw = str(values.get(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise TunnelConfigurationError(f"{key} 必须是整数。") from exc
+    if not 1 <= value <= 600:
+        raise TunnelConfigurationError(f"{key} 必须在 1 到 600 之间。")
     return value
 
 
@@ -259,6 +278,11 @@ def tunnel_config(
             8890,
         ),
         known_hosts_path=known_hosts_path,
+        connect_timeout_seconds=duration_seconds_value(
+            values,
+            "DRAWING_GATEWAY_SSH_CONNECT_TIMEOUT_SECONDS",
+            15,
+        ),
     )
 
 
@@ -286,6 +310,8 @@ def ssh_command(config: DrawingGatewayTunnelConfig) -> list[str]:
             "IdentitiesOnly=yes",
             "-o",
             "ExitOnForwardFailure=yes",
+            "-o",
+            f"ConnectTimeout={config.connect_timeout_seconds}",
             "-o",
             "ServerAliveInterval=30",
             "-o",

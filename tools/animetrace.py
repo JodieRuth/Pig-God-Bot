@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import uuid
 from pathlib import Path
@@ -14,12 +15,17 @@ SCRIPT_PATH = Path(__file__).with_name("animetrace_headless.py")
 HOST_DIR = Path(__file__).with_name("browser_automation_host")
 HOST_PROJECT = HOST_DIR / "browser_automation_host.csproj"
 HOST_DLL = HOST_DIR / "bin" / "Release" / "net9.0-windows" / "browser_automation_host.dll"
+HOST_EXE = HOST_DLL.with_suffix(".exe")
 HOST_BUILD_STAMP = HOST_DLL.with_suffix(".source.sha256")
 DEFAULT_URL = os.getenv("ANIMETRACE_URL", "https://ai.animedb.cn/en/")
 DEFAULT_WAIT_MS = int(os.getenv("ANIMETRACE_WAIT_MS", "20000"))
 DEFAULT_CAPTURE_JSON = os.getenv("ANIMETRACE_CAPTURE_JSON", "0") == "1"
 DEFAULT_BROWSER_PATH = os.getenv("ANIMETRACE_BROWSER_PATH", "").strip() or None
 DEFAULT_BACKEND = os.getenv("ANIMETRACE_BACKEND", "webview2").strip().lower()
+
+
+class AnimeTraceBackendUnavailable(RuntimeError):
+    pass
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -81,26 +87,78 @@ def host_source_fingerprint() -> str:
     return digest.hexdigest()
 
 
+def executable_path(value: str | None) -> str:
+    text = os.path.expandvars(str(value or "").strip())
+    if not text:
+        return ""
+    path = Path(text).expanduser()
+    if path.is_file():
+        return str(path.resolve())
+    located = shutil.which(text)
+    return str(Path(located).resolve()) if located else ""
+
+
+def resolve_dotnet_path() -> str:
+    candidates = [
+        os.getenv("ANIMETRACE_DOTNET_PATH"),
+        os.getenv("DOTNET_HOST_PATH"),
+        shutil.which("dotnet"),
+    ]
+    for root_name in ("DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_ROOT(x86)"):
+        root = os.getenv(root_name)
+        if root:
+            candidates.append(str(Path(root) / ("dotnet.exe" if os.name == "nt" else "dotnet")))
+    if os.name == "nt":
+        candidates.extend(
+            [
+                str(Path(os.getenv("ProgramFiles", r"C:\Program Files")) / "dotnet" / "dotnet.exe"),
+                str(Path(os.getenv("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "dotnet" / "dotnet.exe"),
+            ]
+        )
+    for candidate in candidates:
+        resolved = executable_path(candidate)
+        if resolved:
+            return resolved
+    return ""
+
+
+def webview2_host_command() -> list[str]:
+    if HOST_EXE.is_file():
+        return [str(HOST_EXE)]
+    if not HOST_DLL.is_file():
+        raise AnimeTraceBackendUnavailable("WebView2 宿主构建产物不存在")
+    dotnet_path = resolve_dotnet_path()
+    if not dotnet_path:
+        raise AnimeTraceBackendUnavailable("未找到 dotnet.exe，无法启动 WebView2 宿主")
+    return [dotnet_path, str(HOST_DLL)]
+
+
 async def ensure_host_built(ctx: dict[str, Any]) -> None:
     source_hash = host_source_fingerprint()
-    if HOST_DLL.exists() and HOST_BUILD_STAMP.exists():
+    if (HOST_EXE.exists() or HOST_DLL.exists()) and HOST_BUILD_STAMP.exists():
         try:
             if HOST_BUILD_STAMP.read_text(encoding="utf-8").strip() == source_hash:
                 return
         except OSError:
             pass
     if not HOST_PROJECT.exists():
-        raise RuntimeError("WebView2 宿主项目不存在")
+        raise AnimeTraceBackendUnavailable("WebView2 宿主项目不存在")
+    dotnet_path = resolve_dotnet_path()
+    if not dotnet_path:
+        raise AnimeTraceBackendUnavailable("未找到 .NET SDK，无法构建 WebView2 宿主")
     ctx["log"]("AnimeTrace WebView2 host build start")
-    proc = await asyncio.create_subprocess_exec(
-        "dotnet",
-        "build",
-        str(HOST_PROJECT),
-        "-c",
-        "Release",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            dotnet_path,
+            "build",
+            str(HOST_PROJECT),
+            "-c",
+            "Release",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise AnimeTraceBackendUnavailable("dotnet.exe 不存在或无法启动") from exc
     stdout, stderr = await proc.communicate()
     stdout_text = stdout.decode("utf-8", errors="replace").strip()
     stderr_text = stderr.decode("utf-8", errors="replace").strip()
@@ -110,7 +168,7 @@ async def ensure_host_built(ctx: dict[str, Any]) -> None:
         ctx["log"](f"AnimeTrace WebView2 host build stderr:\n{stderr_text[:6000]}")
     if proc.returncode != 0 or not HOST_DLL.exists():
         detail = sanitize_child_error(stderr_text or stdout_text or f"exit code {proc.returncode}")
-        raise RuntimeError(f"WebView2 宿主编译失败：{detail}")
+        raise AnimeTraceBackendUnavailable(f"WebView2 宿主编译失败：{detail}")
     try:
         HOST_BUILD_STAMP.parent.mkdir(parents=True, exist_ok=True)
         HOST_BUILD_STAMP.write_text(source_hash, encoding="utf-8")
@@ -124,8 +182,7 @@ async def run_animetrace_webview2(image: Path, ctx: dict[str, Any]) -> dict[str,
     output_dir.mkdir(parents=True, exist_ok=True)
     result_path = output_dir / f"animetrace_{uuid.uuid4().hex}.json"
     command = [
-        "dotnet",
-        str(HOST_DLL),
+        *webview2_host_command(),
         "--task",
         "animetrace",
         "--image",
@@ -142,12 +199,15 @@ async def run_animetrace_webview2(image: Path, ctx: dict[str, Any]) -> dict[str,
     env = os.environ.copy()
     env["DOTNET_CLI_UI_LANGUAGE"] = "zh-CN"
     ctx["log"](f"AnimeTrace WebView2 host start: {' '.join(command)}")
-    proc = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise AnimeTraceBackendUnavailable("WebView2 宿主进程不存在或无法启动") from exc
     timeout = max(DEFAULT_WAIT_MS / 1000 + 45, 75)
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -163,9 +223,9 @@ async def run_animetrace_webview2(image: Path, ctx: dict[str, Any]) -> dict[str,
         ctx["log"](f"AnimeTrace WebView2 host stderr:\n{stderr_text[:6000]}")
     if proc.returncode != 0:
         detail = sanitize_child_error(stderr_text or stdout_text or f"exit code {proc.returncode}")
-        raise RuntimeError(f"AnimeTrace WebView2 宿主失败：{detail}")
+        raise AnimeTraceBackendUnavailable(f"AnimeTrace WebView2 宿主失败：{detail}")
     if not result_path.exists():
-        raise RuntimeError("AnimeTrace WebView2 宿主没有生成结果文件")
+        raise AnimeTraceBackendUnavailable("AnimeTrace WebView2 宿主没有生成结果文件")
     try:
         with result_path.open("r", encoding="utf-8") as f:
             result = json.load(f)
@@ -232,7 +292,22 @@ async def run_animetrace_playwright(image: Path, ctx: dict[str, Any]) -> dict[st
 async def run_animetrace(image: Path, ctx: dict[str, Any]) -> dict[str, Any]:
     if DEFAULT_BACKEND == "playwright":
         return await run_animetrace_playwright(image, ctx)
-    return await run_animetrace_webview2(image, ctx)
+    if DEFAULT_BACKEND not in {"webview2", "auto"}:
+        raise RuntimeError(f"不支持的 AnimeTrace 后端：{DEFAULT_BACKEND}")
+    try:
+        return await run_animetrace_webview2(image, ctx)
+    except AnimeTraceBackendUnavailable as exc:
+        ctx["log"](
+            "AnimeTrace WebView2 unavailable, falling back to Playwright: "
+            f"{sanitize_child_error(str(exc))}"
+        )
+        try:
+            return await run_animetrace_playwright(image, ctx)
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                "AnimeTrace WebView2 不可用，Playwright 备用后端也失败："
+                f"{sanitize_child_error(str(fallback_exc))}"
+            ) from fallback_exc
 
 
 

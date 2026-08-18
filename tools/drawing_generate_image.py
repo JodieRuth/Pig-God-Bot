@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import Any
 
@@ -13,9 +12,15 @@ from _drawing_gateway import (
     load_config,
     submit_generation,
 )
+from _drawing_generation_runtime import (
+    BACKGROUND_GENERATION_TASKS,
+    attach_background_generation_task,
+    create_public_generation_id,
+    generation_reply_allowed,
+    release_public_generation,
+)
 
 
-BACKGROUND_GENERATION_TASKS: dict[str, asyncio.Task[Any]] = {}
 PERMANENT_MONITOR_ERROR_CODES = {
     "api_key_required",
     "api_key_invalid",
@@ -23,7 +28,7 @@ PERMANENT_MONITOR_ERROR_CODES = {
     "job_not_found",
     "not_configured",
 }
-TOOL_DESCRIPTION = "使用 Drawing Gateway 管理的本地图片模型（本地 A1111）提交合规的纯文生图后台任务，不直接调用 A1111。推荐用于没有参考图的二次元、动漫或游戏角色文生图；本工具不接受参考图，不用于已有图片的二次修改、修图、改风格、替换主体或合成，这些请求必须使用通用远程工具 generate_image。对同一请求不得同时调用两套生图工具。正确流程：先用 drawing_search_loras 查询已安装 LoRA，再用 drawing_prompt_suggestions 获取训练词、预设和示例；已安装目录没有所需 LoRA 时才用 drawing_search_civitai，只有 ADMIN_USERS 可以调用 drawing_download_lora，随后用 drawing_download_status 等待成功，并重新调用 drawing_search_loras 获取精确 managed identifier；最后再调用本工具。网关接受任务后，本工具会立即向 QQ 回复 job id、状态和排队位置，并结束当前 LLM 回复；机器人随后在后台监控同一个网关任务，成功后主动向原 QQ 会话发送每张图的临时 URL、密码、过期时间、seed 和安全参数，失败或取消也会主动通知。不得因为没有即时图片而重复提交；用户主动询问已有任务时使用 drawing_generation_status。LoRA 必须通过 loras 参数传入精确 source/identifier，不得把 A1111 LoRA 语法直接塞进 prompt。不下载图片、不返回 base64、不调用全局中断。若请求涉及政治敏感、中国大陆政治不正确、违法违规、暴力恐怖、色情低俗、赌博诈骗、侵犯隐私、规避平台审核、攻击骚扰、仇恨歧视、自伤诱导、未成年人不当内容、伪造证件票据、冒充真实个人或 QQ 平台及中国大陆法规不允许的内容，禁止调用。"
+TOOL_DESCRIPTION = "使用 Drawing Gateway 管理的本地图片模型（本地 A1111）提交合规的纯文生图任务，不直接调用 A1111。推荐用于没有参考图的二次元、动漫或游戏角色文生图；本工具不接受参考图，不用于已有图片的二次修改、修图、改风格、替换主体或合成，这些请求必须使用通用远程工具 generate_image。对同一请求不得同时调用两套生图工具。正确流程：先用 drawing_search_loras 查询已安装 LoRA，再用 drawing_prompt_suggestions 获取训练词、预设和示例；已安装目录没有所需 LoRA 时才用 drawing_search_civitai，只有 ADMIN_USERS 可以调用 drawing_download_lora，随后用 drawing_download_status 等待成功，并重新调用 drawing_search_loras 获取精确 managed identifier；最后再调用本工具。提交成功后会像普通 generate_image 一样立即回复机器人生成的八位任务号和正在生成文案，完成后只发送图片链接；不得向用户复述网关 job id、排队位置、密码、到期时间、seed、生成参数或内部等待方式。不得因为没有即时图片而重复提交；用户主动询问已有任务时使用 drawing_generation_status，管理员可用 /status <八位任务号> 停止等待且后续结果不会再发送。LoRA 必须通过 loras 参数传入精确 source/identifier，不得把 A1111 LoRA 语法直接塞进 prompt。不下载图片、不返回 base64、不调用全局中断。若请求涉及政治敏感、中国大陆政治不正确、违法违规、暴力恐怖、色情低俗、赌博诈骗、侵犯隐私、规避平台审核、攻击骚扰、仇恨歧视、自伤诱导、未成年人不当内容、伪造证件票据、冒充真实个人或 QQ 平台及中国大陆法规不允许的内容，禁止调用。"
 
 
 def definition(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -127,7 +132,7 @@ def definition(ctx: dict[str, Any]) -> dict[str, Any]:
                     },
                     "notice": {
                         "type": "string",
-                        "description": "任务被网关接受后立即发送给 QQ 用户的自然语言回执开头。程序会自动追加 job id、状态、排队位置和完成后主动通知的说明。",
+                        "description": "任务启动成功后立即发送给 QQ 用户的自然语言回复。程序会自动追加机器人八位任务号和“当前正在生成”，不要提及网关、排队位置、密码、seed、参数或内部等待方式。",
                     },
                 },
                 "additionalProperties": False,
@@ -157,67 +162,35 @@ def elapsed_text(ctx: dict[str, Any], started: float) -> str:
 
 def submission_reply(
     notice: str,
-    submission: dict[str, Any],
+    public_id: str,
 ) -> str:
-    job_id = str(submission.get("job_id") or "")
-    status = str(submission.get("status") or "queued")
-    position = submission.get("position")
-    if status == "queued" and isinstance(position, int) and position > 0:
-        state = f"当前在网关全局队列中排第 {position} 位。"
-    elif status == "queued":
-        state = "当前已进入网关全局队列。"
-    elif status == "running":
-        state = "当前正在由本地模型生成。"
-    else:
-        state = f"网关当前状态：{status}，正在确认最终结果。"
     return (
         f"{notice}\n"
-        f"本地模型任务 ID：{job_id}\n"
-        f"{state}\n"
-        "机器人会在后台监控该任务，完成、失败或取消后主动通知。"
+        f"任务 ID：{public_id}\n"
+        "当前正在生成。"
     )
 
 
 def completion_messages(
     result: dict[str, Any],
+    public_id: str,
     elapsed: str,
 ) -> list[str]:
-    job_id = str(result.get("job_id") or "")
     raw_images = result.get("images")
     images = raw_images if isinstance(raw_images, list) else []
-    raw_seeds = result.get("seeds")
-    seeds = raw_seeds if isinstance(raw_seeds, list) else []
-    parameters = result.get("parameters")
     header_lines = [
-        f"本地模型任务 {job_id} 完成，用时 {elapsed}。",
-        f"共返回 {len(images)} 张图片。临时链接和密码会在标注时间后失效。",
+        f"任务 {public_id} 完成，用时 {elapsed}。",
     ]
-    if isinstance(parameters, dict) and parameters:
-        header_lines.append(
-            "生成参数："
-            + json.dumps(
-                parameters,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
     if not images:
-        header_lines.append("网关没有返回可用的临时图片链接。")
+        header_lines.append("没有返回可用的图片链接。")
         return ["\n".join(header_lines)]
     blocks = []
     for index, image in enumerate(images):
         if not isinstance(image, dict):
             continue
-        seed = seeds[index] if index < len(seeds) else None
-        lines = [
-            f"图片 {index + 1}",
-            f"临时 URL：{image.get('url') or ''}",
-            f"密码：{image.get('password') or ''}",
-            f"过期时间：{image.get('expires_at') or ''}",
-        ]
-        if isinstance(seed, int) and not isinstance(seed, bool):
-            lines.append(f"Seed：{seed}")
-        blocks.append("\n".join(lines))
+        url = str(image.get("url") or "").strip()
+        if url:
+            blocks.append(f"图片 {index + 1}：{url}")
     messages: list[str] = []
     current = "\n".join(header_lines)
     for block in blocks:
@@ -234,28 +207,31 @@ def completion_messages(
 
 def terminal_status_message(
     result: dict[str, Any],
+    public_id: str,
     elapsed: str,
 ) -> str:
-    job_id = str(result.get("job_id") or "")
     status = str(result.get("status") or "unknown")
     if status == "cancelled":
-        return f"本地模型任务 {job_id} 已取消，已用时 {elapsed}。"
+        return f"任务 {public_id} 已取消，已用时 {elapsed}。"
     error = result.get("error")
     if isinstance(error, dict):
         code = str(error.get("code") or "")
         description = str(error.get("description") or "网关任务失败")
         detail = f"{description}（{code}）" if code else description
     else:
-        detail = "网关没有返回具体失败原因"
-    return f"本地模型任务 {job_id} 失败，用时 {elapsed}：{detail}。"
+        detail = "没有返回具体失败原因"
+    return f"任务 {public_id} 失败，用时 {elapsed}：{detail}。"
 
 
 async def reply_with_retry(
     event: dict[str, Any],
     message: str,
+    public_id: str,
     ctx: dict[str, Any],
 ) -> bool:
     for attempt in range(5):
+        if not generation_reply_allowed(public_id):
+            return False
         try:
             await ctx["reply"](event, message)
             return True
@@ -280,99 +256,76 @@ def permanent_monitor_error(exc: DrawingGatewayToolError) -> bool:
 
 async def monitor_generation(
     event: dict[str, Any],
-    job_id: str,
+    public_id: str,
+    gateway_job_id: str,
     poll_interval: float,
     ctx: dict[str, Any],
 ) -> None:
     started = time.monotonic()
-    failures = 0
-    interruption_reported = False
     while True:
         try:
-            result = await generation_status(job_id)
-            failures = 0
+            result = await generation_status(gateway_job_id)
         except asyncio.CancelledError:
             ctx["log"](
-                f"Drawing Gateway background monitor cancelled: job_id={job_id}"
+                "Drawing Gateway result wait cancelled: "
+                f"public_id={public_id} job_id={gateway_job_id}"
             )
             raise
         except DrawingGatewayToolError as exc:
             ctx["log"](
                 "Drawing Gateway background status failed: "
-                f"job_id={job_id} code={exc.code or 'unknown'}"
+                f"public_id={public_id} job_id={gateway_job_id} "
+                f"code={exc.code or 'unknown'}"
             )
             if permanent_monitor_error(exc):
                 await reply_with_retry(
                     event,
-                    (
-                        f"本地模型任务 {job_id} 的后台监控已停止："
-                        f"{exc.public_message}\n"
-                        "任务可能仍保留在网关中，可稍后按原任务 ID 查询。"
-                    ),
+                    f"任务 {public_id} 未能返回结果：{exc.public_message}",
+                    public_id,
                     ctx,
                 )
                 return
-            failures += 1
-            if failures >= 3 and not interruption_reported:
-                interruption_reported = True
-                await reply_with_retry(
-                    event,
-                    (
-                        f"本地模型任务 {job_id} 暂时无法查询状态，"
-                        "机器人会继续在后台重试，不会重新提交任务。"
-                    ),
-                    ctx,
-                )
             await asyncio.sleep(poll_interval)
             continue
         except Exception as exc:
-            failures += 1
             ctx["log"](
                 "Drawing Gateway background status internal failure: "
-                f"job_id={job_id} error={ctx['exception_detail'](exc)}"
+                f"public_id={public_id} job_id={gateway_job_id} "
+                f"error={ctx['exception_detail'](exc)}"
             )
-            if failures >= 3 and not interruption_reported:
-                interruption_reported = True
-                await reply_with_retry(
-                    event,
-                    (
-                        f"本地模型任务 {job_id} 暂时无法查询状态，"
-                        "机器人会继续在后台重试，不会重新提交任务。"
-                    ),
-                    ctx,
-                )
             await asyncio.sleep(poll_interval)
             continue
         status = str(result.get("status") or "")
         ctx["log"](
-            f"Drawing Gateway background status: job_id={job_id} status={status}"
+            "Drawing Gateway background status: "
+            f"public_id={public_id} job_id={gateway_job_id} status={status}"
         )
         if status in ACTIVE_GENERATION_STATUSES:
             await asyncio.sleep(poll_interval)
             continue
         elapsed = elapsed_text(ctx, started)
         if status == "succeeded":
-            for message in completion_messages(result, elapsed):
-                await reply_with_retry(event, message, ctx)
+            for message in completion_messages(result, public_id, elapsed):
+                await reply_with_retry(event, message, public_id, ctx)
             return
         await reply_with_retry(
             event,
-            terminal_status_message(result, elapsed),
+            terminal_status_message(result, public_id, elapsed),
+            public_id,
             ctx,
         )
         return
 
 
 def track_background_task(
-    job_id: str,
+    public_id: str,
     task: asyncio.Task[Any],
     ctx: dict[str, Any],
 ) -> None:
-    BACKGROUND_GENERATION_TASKS[job_id] = task
+    attach_background_generation_task(public_id, task)
 
     def completed(completed_task: asyncio.Task[Any]) -> None:
-        if BACKGROUND_GENERATION_TASKS.get(job_id) is completed_task:
-            BACKGROUND_GENERATION_TASKS.pop(job_id, None)
+        release_public_generation(public_id, completed_task)
         if completed_task.cancelled():
             return
         try:
@@ -382,7 +335,7 @@ def track_background_task(
         if error is not None:
             ctx["log"](
                 "Drawing Gateway background task failed: "
-                f"job_id={job_id} error={ctx['exception_detail'](error)}"
+                f"public_id={public_id} error={ctx['exception_detail'](error)}"
             )
 
     task.add_done_callback(completed)
@@ -402,45 +355,59 @@ async def execute(
             exc,
             ctx,
         )
-    job_id = str(submission.get("job_id") or "")
+    gateway_job_id = str(submission.get("job_id") or "")
+    reserved_ids = set(ctx.get("jobs", {}))
+    reserved_ids.update(ctx.get("active_image_jobs", {}))
+    for item in ctx.get("image_queue", []):
+        if isinstance(item, dict) and item.get("job_id"):
+            reserved_ids.add(str(item["job_id"]))
+    public_id = create_public_generation_id(
+        gateway_job_id,
+        reserved_ids,
+    )
     create_task = ctx.get("create_task")
-    task = (
-        create_task(
-            monitor_generation(
-                runtime["event"],
-                job_id,
-                poll_interval,
-                ctx,
+    try:
+        task = (
+            create_task(
+                monitor_generation(
+                    runtime["event"],
+                    public_id,
+                    gateway_job_id,
+                    poll_interval,
+                    ctx,
+                )
+            )
+            if callable(create_task)
+            else asyncio.create_task(
+                monitor_generation(
+                    runtime["event"],
+                    public_id,
+                    gateway_job_id,
+                    poll_interval,
+                    ctx,
+                )
             )
         )
-        if callable(create_task)
-        else asyncio.create_task(
-            monitor_generation(
-                runtime["event"],
-                job_id,
-                poll_interval,
-                ctx,
-            )
-        )
-    )
-    track_background_task(job_id, task, ctx)
+        track_background_task(public_id, task, ctx)
+    except Exception:
+        release_public_generation(public_id)
+        raise
     notice = (
-        str(args.get("notice") or "本地模型任务已提交。").strip()
-        or "本地模型任务已提交。"
+        str(args.get("notice") or "收到，图像任务已开始。").strip()
+        or "收到，图像任务已开始。"
     )
-    reply_text = submission_reply(notice, submission)
+    reply_text = submission_reply(notice, public_id)
     try:
         await ctx["reply"](runtime["event"], reply_text)
     except Exception as exc:
         ctx["log"](
             "Drawing Gateway submission QQ reply failed: "
-            f"job_id={job_id} error={ctx['exception_detail'](exc)}"
+            f"public_id={public_id} job_id={gateway_job_id} "
+            f"error={ctx['exception_detail'](exc)}"
         )
     return {
         "ok": True,
         "answered": True,
         "content": reply_text,
-        "job_id": job_id,
-        "status": submission.get("status"),
-        "position": submission.get("position"),
+        "job_id": public_id,
     }
