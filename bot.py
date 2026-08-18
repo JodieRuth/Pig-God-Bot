@@ -643,6 +643,7 @@ class RpmLimiter:
 MAX_CONTEXT_MESSAGES = 30
 MAX_CONTEXT_AGE_SECONDS = 30 * 60
 MAX_CONTEXT_IMAGES = 10
+FORWARD_FALLBACK_MAX_CHARS = 1800
 IMAGE_SENDER_CACHE_TTL_SECONDS = 60 * 60
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 LLM_MAX_RPM = int(os.getenv("LLM_MAX_RPM", "30"))
@@ -1068,11 +1069,58 @@ async def onebot_post(action: str, payload: dict[str, Any]) -> Any:
     async with aiohttp.ClientSession(headers=auth_headers()) as session:
         async with session.post(f"{ONEBOT_HTTP}/{action}", json=payload, timeout=60) as resp:
             text = await resp.text()
+            response: Any = None
+            if text:
+                try:
+                    response = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    detail = f"OneBot {action} failed: HTTP {resp.status}, invalid JSON response"
+                    log(detail)
+                    raise RuntimeError(detail) from exc
             if resp.status >= 400:
-                log(f"OneBot {action} failed: HTTP {resp.status} {text}")
-                raise RuntimeError(f"OneBot {action} failed: HTTP {resp.status} {text}")
+                detail = onebot_failure_detail(action, response, http_status=resp.status)
+                log(detail)
+                raise RuntimeError(detail)
+            if onebot_response_failed(response):
+                detail = onebot_failure_detail(action, response)
+                log(detail)
+                raise RuntimeError(detail)
             log(f"OneBot {action} response: HTTP {resp.status} {text[:500]}")
-            return json.loads(text) if text else None
+            return response
+
+
+def onebot_response_failed(response: Any) -> bool:
+    if not isinstance(response, dict):
+        return False
+    if str(response.get("status") or "").strip().lower() == "failed":
+        return True
+    retcode = response.get("retcode")
+    if retcode is None:
+        return False
+    try:
+        return int(retcode) != 0
+    except (TypeError, ValueError):
+        return str(retcode).strip() not in {"", "0"}
+
+
+def onebot_failure_detail(action: str, response: Any, http_status: int | None = None) -> str:
+    parts = [f"OneBot {action} failed"]
+    if http_status is not None:
+        parts.append(f"HTTP {http_status}")
+    if isinstance(response, dict):
+        retcode = response.get("retcode")
+        if retcode is not None:
+            parts.append(f"retcode={sanitize_error_detail(retcode, 40)}")
+        messages: list[str] = []
+        for key in ("message", "wording"):
+            value = response.get(key)
+            if value in (None, ""):
+                continue
+            message = sanitize_error_detail(value, 240)
+            if message != "未知错误" and message not in messages:
+                messages.append(message)
+        parts.extend(messages)
+    return ": ".join(parts)
 
 
 def context_text_from_reply(message: str | list[dict[str, Any]]) -> str:
@@ -1176,8 +1224,32 @@ async def reply_forward(event: dict[str, Any], lines: list[str]) -> None:
         else:
             await onebot_post("send_private_forward_msg", {"user_id": event["user_id"], "messages": messages})
     except Exception as exc:
-        log(f"Forward message failed: {exc}")
-        await reply(event, "转发消息失败。")
+        log(f"Forward message failed, falling back to plain messages: {exception_detail(exc)}")
+        for message in forward_fallback_messages(sections):
+            await reply(event, message)
+
+
+def forward_fallback_messages(
+    sections: list[list[str]],
+    max_chars: int = FORWARD_FALLBACK_MAX_CHARS,
+) -> list[str]:
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    messages: list[str] = []
+    for section in sections:
+        text = "\n".join(str(line) for line in section if str(line).strip()).strip()
+        while text:
+            if len(text) <= max_chars:
+                messages.append(text)
+                break
+            split_at = text.rfind("\n", 0, max_chars + 1)
+            if split_at <= 0:
+                split_at = max_chars
+            chunk = text[:split_at].rstrip()
+            if chunk:
+                messages.append(chunk)
+            text = text[split_at:].lstrip("\r\n")
+    return messages
 
 
 def qq_avatar_url(qq: int | str, size: int = 640) -> str:

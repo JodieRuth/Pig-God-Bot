@@ -5,6 +5,7 @@
   "/cancel": [],
   "/ccf": [],
   "/clear": [],
+  "/deop": [],
   "/getlist": [],
   "/getprofile": [],
   "/haochi": [
@@ -17,6 +18,7 @@
   "/image": [],
   "/jrrp": [],
   "/mcserver": [],
+  "/op": [],
   "/ping": [],
   "/quote": [
     "/收藏"
@@ -33,6 +35,12 @@
   "/rpp": [],
   "/rpp_r": [],
   "/rpp_s": [],
+  "/sb": [],
+  "/sb_r": [],
+  "/sb_s": [],
+  "/sbt": [],
+  "/sbt_r": [],
+  "/sbt_s": [],
   "/status": [],
   "/stop": [],
   "/suanming": [],
