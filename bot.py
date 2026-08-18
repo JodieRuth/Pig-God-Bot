@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 import bot_policy_state
 
 ROOT = Path(__file__).resolve().parent
+ENV_FILE = ROOT / ".env"
+load_dotenv(ENV_FILE, override=True)
 CACHE_ROOT = ROOT / "cache"
 CACHE_DIR = CACHE_ROOT / "images"
 OUTPUT_DIR = ROOT / "outputs"
@@ -50,13 +52,24 @@ VNDB_JSON_SERVER_LOG_TASKS: set[asyncio.Task[Any]] = set()
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888").rstrip("/")
 SEARXNG_HEALTH_URL = f"{SEARXNG_URL}/"
 SEARXNG_AUTO_START = os.getenv("SEARXNG_AUTO_START", "1") != "0"
-SEARXNG_ROOT = Path(os.getenv("SEARXNG_ROOT", str(ROOT.parent / "SearXNG"))).resolve()
-SEARXNG_RUNTIME_DIR = Path(os.getenv("SEARXNG_RUNTIME_DIR", str(SEARXNG_ROOT / "runtime"))).resolve()
-SEARXNG_PYTHON_BIN = Path(os.getenv("SEARXNG_PYTHON_BIN", str(SEARXNG_RUNTIME_DIR / ".venv" / "Scripts" / "python.exe"))).resolve()
-SEARXNG_GRANIAN_BIN = Path(os.getenv("SEARXNG_GRANIAN_BIN", str(SEARXNG_RUNTIME_DIR / ".venv" / "Scripts" / "granian.exe"))).resolve()
-SEARXNG_SETTINGS_PATH = Path(os.getenv("SEARXNG_SETTINGS_PATH", str(SEARXNG_RUNTIME_DIR / "settings-local.yml"))).resolve()
+SEARXNG_ROOT = Path(os.getenv("SEARXNG_ROOT", "").strip() or ROOT.parent / "SearXNG").resolve()
+SEARXNG_RUNTIME_DIR = Path(os.getenv("SEARXNG_RUNTIME_DIR", "").strip() or SEARXNG_ROOT / "runtime").resolve()
+SEARXNG_VENV_DIR = (SEARXNG_RUNTIME_DIR / ".venv").resolve()
+SEARXNG_SCRIPTS_DIR = SEARXNG_VENV_DIR / ("Scripts" if os.name == "nt" else "bin")
+SEARXNG_PYTHON_BIN = Path(
+    os.getenv("SEARXNG_PYTHON_BIN", "").strip()
+    or SEARXNG_SCRIPTS_DIR / ("python.exe" if os.name == "nt" else "python")
+).resolve()
+SEARXNG_GRANIAN_BIN = Path(
+    os.getenv("SEARXNG_GRANIAN_BIN", "").strip()
+    or SEARXNG_SCRIPTS_DIR / ("granian.exe" if os.name == "nt" else "granian")
+).resolve()
+SEARXNG_SETTINGS_PATH = Path(
+    os.getenv("SEARXNG_SETTINGS_PATH", "").strip()
+    or SEARXNG_RUNTIME_DIR / "settings-local.yml"
+).resolve()
 SEARXNG_START_TIMEOUT = int(os.getenv("SEARXNG_START_TIMEOUT", "60"))
-SEARXNG_HOST = os.getenv("SEARXNG_HOST", "0.0.0.0")
+SEARXNG_HOST = os.getenv("SEARXNG_HOST", "").strip() or "127.0.0.1"
 SEARXNG_PORT = int(os.getenv("SEARXNG_PORT", "8888"))
 SEARXNG_WORKERS = int(os.getenv("SEARXNG_WORKERS", "1"))
 SEARXNG_RUNTIME_THREADS = int(os.getenv("SEARXNG_RUNTIME_THREADS", "1"))
@@ -65,6 +78,7 @@ SEARXNG_BACKPRESSURE = int(os.getenv("SEARXNG_BACKPRESSURE", "16"))
 SEARXNG_USE_SYSTEM_PROXY = os.getenv("SEARXNG_USE_SYSTEM_PROXY", "1") != "0"
 SEARXNG_PROCESS: asyncio.subprocess.Process | None = None
 SEARXNG_LOG_TASKS: set[asyncio.Task[Any]] = set()
+SEARXNG_RECENT_LOGS: deque[str] = deque(maxlen=16)
 SERVICE_KILL_TIMEOUT = int(os.getenv("SERVICE_KILL_TIMEOUT", "10"))
 
 
@@ -221,8 +235,6 @@ if not isinstance(sys.stderr, TeeStream):
 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Console log file: {LOG_FILE}", flush=True)
 
 
-ENV_FILE = ROOT / ".env"
-load_dotenv(ENV_FILE, override=True)
 _env_mtime = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0.0
 _prompts_mtime = PROMPTS_FILE.stat().st_mtime if PROMPTS_FILE.exists() else 0.0
 
@@ -3427,7 +3439,13 @@ async def pipe_searxng_server_log(stream: asyncio.StreamReader | None, name: str
         line = await stream.readline()
         if not line:
             break
-        log(f"SearXNG {name}: {line.decode('utf-8', errors='replace').rstrip()}")
+        detail = sanitize_error_detail(
+            line.decode("utf-8", errors="replace").replace("\x00", "").rstrip(),
+            400,
+        )
+        if detail != "未知错误":
+            SEARXNG_RECENT_LOGS.append(f"{name}: {detail}")
+            log(f"SearXNG {name}: {detail}")
 
 
 def normalize_proxy_url(value: str) -> str:
@@ -3499,10 +3517,75 @@ def apply_proxy_env(env: dict[str, str]) -> str:
 async def install_searxng_dependencies() -> str:
     if not SEARXNG_RUNTIME_DIR.exists():
         return f"SearXNG runtime directory missing: {SEARXNG_RUNTIME_DIR}"
-    if not SEARXNG_PYTHON_BIN.exists():
+    requirements = [SEARXNG_RUNTIME_DIR / "requirements.txt", SEARXNG_RUNTIME_DIR / "requirements-server.txt"]
+    missing = [str(path) for path in requirements if not path.exists()]
+    if missing:
+        return f"SearXNG requirements missing: {'; '.join(missing)}"
+
+    expected_python = (
+        SEARXNG_VENV_DIR
+        / ("Scripts" if os.name == "nt" else "bin")
+        / ("python.exe" if os.name == "nt" else "python")
+    ).resolve()
+    expected_granian = (
+        SEARXNG_VENV_DIR
+        / ("Scripts" if os.name == "nt" else "bin")
+        / ("granian.exe" if os.name == "nt" else "granian")
+    ).resolve()
+    managed_venv = (
+        SEARXNG_PYTHON_BIN == expected_python
+        and SEARXNG_GRANIAN_BIN == expected_granian
+        and SEARXNG_VENV_DIR.parent == SEARXNG_RUNTIME_DIR
+        and SEARXNG_VENV_DIR.name == ".venv"
+    )
+
+    async def python_works() -> tuple[bool, str]:
+        if not SEARXNG_PYTHON_BIN.is_file():
+            return False, f"Python 不存在：{SEARXNG_PYTHON_BIN}"
+        code, output = await run_searxng_python_capture(
+            "import sys; print(sys.executable)",
+            os.environ.copy(),
+            timeout=30,
+        )
+        return code == 0, sanitize_error_detail(output)
+
+    async def runtime_works() -> tuple[bool, str]:
+        python_ok, python_detail = await python_works()
+        if not python_ok:
+            return False, python_detail
+        code, output = await run_searxng_python_capture(
+            "import flask, granian, httpx, searx, yaml; print('ok')",
+            os.environ.copy(),
+            timeout=45,
+        )
+        if code != 0:
+            return False, sanitize_error_detail(output)
+        if not SEARXNG_GRANIAN_BIN.is_file():
+            return False, f"Granian 不存在：{SEARXNG_GRANIAN_BIN}"
+        code, output = await run_command_capture(
+            str(SEARXNG_GRANIAN_BIN),
+            "--version",
+            timeout=30,
+        )
+        if code != 0:
+            return False, sanitize_error_detail(output)
+        return True, ""
+
+    runtime_ok, runtime_detail = await runtime_works()
+    if runtime_ok:
+        return ""
+
+    python_ok, _ = await python_works()
+    if not python_ok:
+        if not managed_venv:
+            return f"SearXNG 自定义 Python 无法运行：{runtime_detail}"
         try:
+            args = [sys.executable, "-m", "venv"]
+            if SEARXNG_VENV_DIR.exists():
+                args.append("--clear")
+            args.append(str(SEARXNG_VENV_DIR))
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "venv", str(SEARXNG_RUNTIME_DIR / ".venv"),
+                *args,
                 cwd=str(SEARXNG_RUNTIME_DIR),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -3515,14 +3598,9 @@ async def install_searxng_dependencies() -> str:
             return "SearXNG venv creation timed out"
         except Exception as exc:
             return exception_detail(exc)
-    if not SEARXNG_PYTHON_BIN.exists():
+    if not SEARXNG_PYTHON_BIN.is_file():
         return f"SearXNG venv python missing: {SEARXNG_PYTHON_BIN}"
-    requirements = [SEARXNG_RUNTIME_DIR / "requirements.txt", SEARXNG_RUNTIME_DIR / "requirements-server.txt"]
-    missing = [str(path) for path in requirements if not path.exists()]
-    if missing:
-        return f"SearXNG requirements missing: {'; '.join(missing)}"
-    if SEARXNG_GRANIAN_BIN.exists():
-        return ""
+
     try:
         proc = await asyncio.create_subprocess_exec(
             str(SEARXNG_PYTHON_BIN), "-m", "pip", "install", "-r", str(requirements[0]), "-r", str(requirements[1]),
@@ -3538,9 +3616,20 @@ async def install_searxng_dependencies() -> str:
         return "SearXNG dependency install timed out"
     except Exception as exc:
         return exception_detail(exc)
-    if not SEARXNG_GRANIAN_BIN.exists():
-        return f"SearXNG granian missing after install: {SEARXNG_GRANIAN_BIN}"
+
+    runtime_ok, runtime_detail = await runtime_works()
+    if not runtime_ok:
+        return f"SearXNG runtime validation failed after install: {runtime_detail}"
     return ""
+
+
+async def searxng_early_exit_detail(return_code: int) -> str:
+    pending_logs = list(SEARXNG_LOG_TASKS)
+    if pending_logs:
+        await asyncio.wait(pending_logs, timeout=2)
+    recent = list(SEARXNG_RECENT_LOGS)[-6:]
+    suffix = f"；{' | '.join(recent)}" if recent else ""
+    return sanitize_error_detail(f"进程提前退出：{return_code}{suffix}", 1000)
 
 
 async def run_searxng_python_capture(code: str, env: dict[str, str], timeout: int = 20) -> tuple[int, str]:
@@ -3662,6 +3751,7 @@ async def start_searxng_server() -> tuple[bool, str]:
         log("SearXNG auto-start disabled")
         return True, "自动启动已关闭"
     await force_reset_searxng_server()
+    SEARXNG_RECENT_LOGS.clear()
     install_error = await install_searxng_dependencies()
     if install_error:
         log(f"SearXNG dependency check failed: {install_error}")
@@ -3706,8 +3796,10 @@ async def start_searxng_server() -> tuple[bool, str]:
         task.add_done_callback(SEARXNG_LOG_TASKS.discard)
     for _ in range(SEARXNG_START_TIMEOUT):
         if SEARXNG_PROCESS.returncode is not None:
-            log(f"SearXNG exited early: {SEARXNG_PROCESS.returncode}")
-            return False, f"进程提前退出：{SEARXNG_PROCESS.returncode}"
+            detail = await searxng_early_exit_detail(SEARXNG_PROCESS.returncode)
+            log(f"SearXNG exited early: {detail}")
+            SEARXNG_PROCESS = None
+            return False, detail
         if await searxng_server_is_healthy():
             await log_searxng_runtime_config(env)
             await log_searxng_httpx_probe(env)
@@ -3721,14 +3813,41 @@ async def start_searxng_server() -> tuple[bool, str]:
 
 async def stop_searxng_server() -> None:
     global SEARXNG_PROCESS
-    if SEARXNG_PROCESS is None or SEARXNG_PROCESS.returncode is not None:
+    process = SEARXNG_PROCESS
+    if process is None:
         return
-    SEARXNG_PROCESS.terminate()
-    try:
-        await asyncio.wait_for(SEARXNG_PROCESS.wait(), timeout=5)
-    except asyncio.TimeoutError:
-        SEARXNG_PROCESS.kill()
-        await SEARXNG_PROCESS.wait()
+    if process.returncode is None:
+        if os.name == "nt":
+            code, output = await run_command_capture(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                timeout=SERVICE_KILL_TIMEOUT,
+            )
+            if code != 0:
+                log(
+                    "SearXNG process tree stop failed: "
+                    f"{sanitize_error_detail(output)}"
+                )
+                process.terminate()
+        else:
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+    if os.name == "nt":
+        await windows_kill_processes_on_ports([SEARXNG_PORT])
+    pending_logs = list(SEARXNG_LOG_TASKS)
+    if pending_logs:
+        _, pending = await asyncio.wait(pending_logs, timeout=2)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
     SEARXNG_PROCESS = None
 
 
