@@ -5,9 +5,9 @@ import asyncio
 import ctypes
 import json
 import os
-import re
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def reset_console_title() -> None:
@@ -40,6 +40,13 @@ COMMON_BROWSER_PATHS = [
 DEFAULT_WAIT_MS = int(os.getenv("ANIMETRACE_WAIT_MS", "20000"))
 DEFAULT_CAPTURE_JSON = os.getenv("ANIMETRACE_CAPTURE_JSON", "0") == "1"
 DEFAULT_BROWSER_PATH = os.getenv("ANIMETRACE_BROWSER_PATH", "").strip() or None
+
+
+def is_search_response(url: str, method: str) -> bool:
+    if method.upper() != "POST":
+        return False
+    path = urlsplit(url).path.rstrip("/").lower()
+    return path.endswith("/v1/search") or path.endswith("/agent/search")
 
 
 def pick_browser_path(explicit: str | None) -> str | None:
@@ -75,56 +82,37 @@ async def run(image_path: Path, url: str, wait_ms: int, browser_path: str | None
             nonlocal search_response_obj, search_response_at
             if "animetrace" in resp.url.lower() or "animedb" in resp.url.lower():
                 captured.append((f"RESP {resp.status}", resp.url, None))
-            if resp.request.method == "POST" and resp.url.rstrip("/").endswith("/v1/search") and search_response_obj is None:
+            if is_search_response(resp.url, resp.request.method) and search_response_obj is None:
                 search_response_obj = resp
                 search_response_at = time.perf_counter()
 
         page.on("response", handle_response)
 
-        await page.goto(url, wait_until="networkidle")
+        await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
         file_inputs = page.locator('input[type="file"]')
         if await file_inputs.count() == 0:
             raise RuntimeError("页面里没有找到文件上传控件")
+        await file_inputs.first.wait_for(state="attached", timeout=30000)
         await file_inputs.first.set_input_files(str(image_path))
-
-        clicked = False
-        for label in ["识别", "Search", "识别图片", "提交", "Recognize"]:
-            button = page.get_by_role("button", name=label)
-            try:
-                if await button.count():
-                    await button.first.click()
-                    clicked = True
-                    break
-            except Exception:
-                pass
-        if not clicked:
-            try:
-                await page.mouse.click(10, 10)
-            except Exception:
-                pass
 
         start = time.perf_counter()
         minimum_wait = min(max(wait_ms / 1000, 1), 3)
         deadline = start + max(wait_ms / 1000, 1)
         while time.perf_counter() < deadline:
             body_text = await page.locator("body").inner_text()
-            lines = [re.sub(r"\s+", " ", raw).strip() for raw in body_text.splitlines()]
-            lines = [line for line in lines if line]
-            try:
-                result_start = lines.index("Search result") + 1
-            except ValueError:
-                result_start = -1
-            useful = []
-            if result_start >= 0:
-                stop_markers = {"📢 New Notice!", "New Notice!", "Notice Board", "Got it", "@2024 AnimeTrace", "新機能"}
-                noise = {"Click the character name to view related images", "Results will appear here after uploading an image"}
-                for line in lines[result_start:]:
-                    if line in stop_markers or "File Upload" in line or "Image processing, please wait" in line or "AI is analyzing image" in line:
-                        break
-                    if line not in noise:
-                        useful.append(line)
-            if time.perf_counter() - start >= minimum_wait and (search_response_obj is not None or len(useful) >= 2):
+            rendered_result = any(
+                marker in body_text
+                for marker in (
+                    "No characters found",
+                    "Most likely series",
+                    "没有找到角色",
+                    "最可能的作品",
+                    "キャラクターが見つかりません",
+                    "可能性の高い作品",
+                )
+            )
+            if time.perf_counter() - start >= minimum_wait and (search_response_obj is not None or rendered_result):
                 break
             await page.wait_for_timeout(500)
         elapsed = time.perf_counter() - start

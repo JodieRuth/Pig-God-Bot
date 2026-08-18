@@ -35,18 +35,24 @@ ALLOWED_JSON_FILES = {
 }
 C_SHARP_ROOT = "tools/browser_automation_host"
 C_SHARP_ALLOWED_SUFFIXES = {".cs", ".csproj", ".sha256"}
-ROOT_ALLOWED_FILES = {"requirements.txt", "tools/server.mjs"}
+ROOT_ALLOWED_FILES = {
+    "requirements.txt",
+    "tools/server.mjs",
+    ".env.example",
+    "DRAWING_GATEWAY_DEPLOYMENT.md",
+}
 ROLLBACK_DIR_NAME = "rollback"
 PENDING_UPDATE_FILE = ".pending_update.json"
 STARTUP_MAX_WAIT = 45
 PLAYWRIGHT_CHROMIUM_DIR_PREFIX = "chromium-"
+CODEX_RUNTIME_DIR_NAME = ".codex-cli-runtime"
 
-ROLLBACK_SKIP_ITEMS = {".env", "runtime_state.json", ROLLBACK_DIR_NAME, PENDING_UPDATE_FILE,
+ROLLBACK_SKIP_ITEMS = {".env", "runtime_state.json", ROLLBACK_DIR_NAME, PENDING_UPDATE_FILE, CODEX_RUNTIME_DIR_NAME,
                        "cache", "outputs", "logs", "__pycache__", ".git"}
 
 
 def _short_error(error: str, limit: int = 300) -> str:
-    text = " ".join(str(error).split())
+    text = " ".join(str(error).replace("\x00", "").split())
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
@@ -236,6 +242,77 @@ def _install_crawl4ai_runtime(root: Path) -> str:
         except Exception as exc:
             errors.append(f"playwright install chromium 失败：{type(exc).__name__}: {exc}")
     return "；".join(errors)
+
+
+def _codex_runtime_dir(root: Path) -> Path:
+    configured = os.getenv("CODEX_CLI_RUNTIME_DIR", "").strip()
+    if not configured:
+        return root / CODEX_RUNTIME_DIR_NAME
+    path = Path(os.path.expandvars(configured)).expanduser()
+    return path if path.is_absolute() else root / path
+
+
+def _resolve_executable(value: str) -> Path | None:
+    raw = value.strip().strip('"')
+    if not raw:
+        return None
+    path = Path(os.path.expandvars(raw)).expanduser()
+    if path.is_file():
+        return path.resolve()
+    located = shutil.which(raw)
+    return Path(located).resolve() if located else None
+
+
+def _find_codex_cli(root: Path) -> Path | None:
+    explicit = os.getenv("CODEX_CLI_PATH", "").strip()
+    if explicit:
+        return _resolve_executable(explicit)
+    global_cli = _resolve_executable("codex")
+    if global_cli:
+        return global_cli
+    local_script = _codex_runtime_dir(root) / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    return local_script.resolve() if local_script.is_file() else None
+
+
+def _install_codex_cli_runtime(root: Path) -> tuple[str, str]:
+    current = _find_codex_cli(root)
+    if current:
+        return "", f"已找到 Codex CLI：{current.name}"
+    if os.getenv("CODEX_CLI_PATH", "").strip():
+        return "CODEX_CLI_PATH 指向的文件不存在", ""
+    if os.getenv("CODEX_CLI_AUTO_INSTALL", "1") == "0":
+        return "服务器未找到 Codex CLI，且 CODEX_CLI_AUTO_INSTALL=0", ""
+    npm = _resolve_executable(os.getenv("CODEX_NPM_BIN", "npm"))
+    if npm is None:
+        return "服务器未找到 npm，无法安装 Codex CLI", ""
+    runtime = _codex_runtime_dir(root)
+    package = os.getenv("CODEX_CLI_NPM_PACKAGE", "@openai/codex@latest").strip() or "@openai/codex@latest"
+    try:
+        install_timeout = max(60, int(os.getenv("CODEX_CLI_INSTALL_TIMEOUT_SECONDS", "900")))
+    except ValueError:
+        install_timeout = 900
+    runtime.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(
+            [str(npm), "install", "--prefix", str(runtime), "--no-audit", "--no-fund", package],
+            capture_output=True,
+            text=True,
+            timeout=install_timeout,
+            cwd=str(root),
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        return "安装 Codex CLI 超时", ""
+    except Exception as exc:
+        return f"安装 Codex CLI 失败：{type(exc).__name__}: {exc}", ""
+    output = _short_error((result.stdout or "") + "\n" + (result.stderr or ""), 1000)
+    local_script = runtime / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    if result.returncode != 0:
+        return f"npm 安装 Codex CLI 返回 exit code {result.returncode}: {output}", ""
+    if not local_script.is_file():
+        return f"npm 安装完成但没有找到 Codex CLI 入口：{output}", ""
+    return "", f"Codex CLI 已安装到 {runtime.name}"
 
 
 def _update_vndb_data(root: Path) -> str:
@@ -429,12 +506,19 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
     else:
         await ctx["reply"](event, "Crawl4AI 运行环境已就绪。")
 
+    await ctx["reply"](event, "正在检查 Codex CLI 运行环境...")
+    codex_error, codex_detail = _install_codex_cli_runtime(bot_root)
+    if codex_error:
+        await ctx["reply"](event, f"Codex CLI 运行环境准备失败，将继续重启 bot：{codex_error}")
+    else:
+        await ctx["reply"](event, codex_detail)
+
     await ctx["reply"](event, "正在使用 tools/server.mjs 更新并解压 VNDB 数据...")
     vndb_error = _update_vndb_data(bot_root)
     if vndb_error:
         await ctx["reply"](event, f"VNDB 数据更新失败，将继续重启 bot：{vndb_error}")
     else:
-        await ctx["reply"](event, "VNDB 数据已更新到 tools/data。")
+        await ctx["reply"](event, "VNDB 数据检查与更新已完成。")
 
     await ctx["reply"](event, "正在构建 WebView2 浏览器宿主...")
     webview2_build_error = _build_webview2_host(bot_root)
@@ -488,6 +572,8 @@ async def handler(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> None:
             ctx["log"](f"Update finished with pip warning: {pip_error}")
         if crawl4ai_error:
             ctx["log"](f"Update finished with Crawl4AI warning: {crawl4ai_error}")
+        if codex_error:
+            ctx["log"](f"Update finished with Codex CLI warning: {codex_error}")
         if vndb_error:
             ctx["log"](f"Update finished with VNDB warning: {vndb_error}")
         if webview2_build_error:

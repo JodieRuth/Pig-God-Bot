@@ -103,7 +103,6 @@ public partial class MainForm : Form
         await NavigateAsync(options.Url);
         await WaitForPageReadyAsync();
         await UploadImageAsync(options.Image);
-        await TriggerSearchAsync();
         await WaitForAnimeTraceResultAsync();
         var bodyText = await EvalStringAsync("document.body ? document.body.innerText : ''");
         var title = await EvalStringAsync("document.title || ''");
@@ -244,7 +243,16 @@ public partial class MainForm : Form
             }
             var hasRenderedResult = await EvalBoolAsync("""
 (() => {
-  const lines = (document.body?.innerText || '').split(/\n+/).map(x => x.trim()).filter(Boolean);
+  const bodyText = document.body?.innerText || '';
+  if ([
+    'No characters found',
+    'Most likely series',
+    '没有找到角色',
+    '最可能的作品',
+    'キャラクターが見つかりません',
+    '可能性の高い作品'
+  ].some(x => bodyText.includes(x))) return true;
+  const lines = bodyText.split(/\n+/).map(x => x.trim()).filter(Boolean);
   const start = lines.indexOf('Search result');
   if (start < 0) return false;
   const noise = new Set(['Click the character name to view related images', 'Results will appear here after uploading an image']);
@@ -300,26 +308,6 @@ public partial class MainForm : Form
         await Task.Delay(1200);
     }
 
-    private async Task TriggerSearchAsync()
-    {
-        var script = """
-(() => {
-  const labels = ['识别', 'Search', '识别图片', '提交', 'Recognize'];
-  const nodes = Array.from(document.querySelectorAll('button,input[type=button],input[type=submit],[role=button]'));
-  for (const label of labels) {
-    const target = nodes.find(x => ((x.innerText || x.value || x.getAttribute('aria-label') || '').trim()).includes(label));
-    if (target) {
-      target.click();
-      return true;
-    }
-  }
-  document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-  return false;
-})()
-""";
-        await webView.CoreWebView2.ExecuteScriptAsync(script);
-    }
-
     private async Task OnWebResourceResponseReceivedAsync(CoreWebView2WebResourceResponseReceivedEventArgs e)
     {
         var uri = e.Request.Uri ?? "";
@@ -329,7 +317,7 @@ public partial class MainForm : Form
             return;
         }
         capturedNetwork.Add(["RESP " + e.Response.StatusCode, uri, ""]);
-        if (e.Request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase) && uri.TrimEnd('/').EndsWith("/v1/search", StringComparison.OrdinalIgnoreCase) && searchResponse["text"] is null)
+        if (IsAnimeTraceSearchRequest(e.Request.Method, uri) && searchResponse["text"] is null)
         {
             string? text = null;
             try
@@ -351,6 +339,17 @@ public partial class MainForm : Form
                 ["elapsed"] = stopwatch.Elapsed.TotalSeconds
             };
         }
+    }
+
+    private static bool IsAnimeTraceSearchRequest(string method, string uri)
+    {
+        if (!method.Equals("POST", StringComparison.OrdinalIgnoreCase) || !Uri.TryCreate(uri, UriKind.Absolute, out var parsed))
+        {
+            return false;
+        }
+        var path = parsed.AbsolutePath.TrimEnd('/');
+        return path.EndsWith("/v1/search", StringComparison.OrdinalIgnoreCase) ||
+               path.EndsWith("/agent/search", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<string> EvalStringAsync(string expression)

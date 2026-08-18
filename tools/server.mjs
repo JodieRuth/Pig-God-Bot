@@ -1,29 +1,35 @@
 import { createServer } from 'node:http';
-import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, stat, rename, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, 'data');
+const DATA_DIR = resolve(__dirname, process.env.VNDB_PROFILE_DATA_DIR || 'data');
 const IMAGE_CACHE_DIR = join(__dirname, 'cache', 'images');
 const DATA_FILE = join(DATA_DIR, 'vndb-data.json');
 const GZIP_FILE = join(DATA_DIR, 'vndb-data.json.gz');
 const MANIFEST_FILE = join(DATA_DIR, 'manifest.json');
-const REMOTE_MANIFEST_URL = process.env.VNDB_PROFILE_MANIFEST_URL || 'https://raw.githubusercontent.com/JodieRuth/VNDB-Profile-Search/data-latest/public/data/manifest.json';
+const REMOTE_MANIFEST_URL = (process.env.VNDB_PROFILE_MANIFEST_URL || 'https://raw.githubusercontent.com/JodieRuth/VNDB-Profile-Search/data-latest/public/data/manifest.json').trim();
+const REMOTE_DATA_URL = (process.env.VNDB_PROFILE_DATA_URL || '').trim();
 const GITHUB_MIRROR_PREFIXES = (process.env.GITHUB_MIRROR_PREFIXES || 'https://gh.llkk.cc/,https://ghproxy.net/,https://gh-proxy.com/').split(',').map((item) => item.trim()).filter(Boolean);
+const CURL_BIN = (process.env.VNDB_CURL_BIN || 'curl').trim();
 const VNDB_API_BASE = process.env.VNDB_API_BASE || 'https://api.vndb.org/kana';
 const PORT = Number(process.env.PORT || process.env.VNDB_JSON_SERVER_PORT || 8787);
-const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+const configuredUpdateInterval = Number(process.env.VNDB_PROFILE_UPDATE_INTERVAL_MS || 60 * 60 * 1000);
+const UPDATE_INTERVAL_MS = Number.isFinite(configuredUpdateInterval) && configuredUpdateInterval >= 0 ? configuredUpdateInterval : 60 * 60 * 1000;
+const UPDATE_ON_START = process.env.VNDB_PROFILE_UPDATE_ON_START !== '0';
 
 let data = null;
 let manifest = null;
 let loadingPromise = null;
+let updatePromise = null;
 let lastUpdateCheck = null;
 let lastDataLoad = null;
+let lastUpdateResult = null;
 let tagMeta = new Map();
 let traitMeta = new Map();
 let vnById = new Map();
@@ -105,37 +111,25 @@ function githubMirrorUrl(url, prefix) {
 }
 
 function fetchPlan(url) {
-  const plan = [{ label: 'system proxy', url, proxy: true }];
-  for (const prefix of GITHUB_MIRROR_PREFIXES) plan.push({ label: `mirror ${prefix.replace(/\/$/, '')}`, url: githubMirrorUrl(url, prefix), proxy: false });
-  plan.push({ label: 'direct', url, proxy: false });
+  const plan = [
+    { label: 'curl direct', url, transport: 'curl' },
+    { label: 'node direct', url, transport: 'node' }
+  ];
+  for (const prefix of GITHUB_MIRROR_PREFIXES) {
+    const mirrorUrl = githubMirrorUrl(url, prefix);
+    if (mirrorUrl !== url) plan.push({ label: `curl mirror ${prefix.replace(/\/$/, '')}`, url: mirrorUrl, transport: 'curl' });
+  }
   return plan;
 }
 
-function proxyEnv() {
-  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '';
-  if (!proxy) return null;
-  const env = { ...process.env };
-  env.HTTPS_PROXY = proxy;
-  env.HTTP_PROXY = proxy;
-  env.https_proxy = proxy;
-  env.http_proxy = proxy;
-  return env;
-}
-
-function systemProxyUnavailableError() {
-  return new Error('system proxy unavailable: HTTPS_PROXY/HTTP_PROXY is not configured');
-}
-
 function fetchByCurl(url, options, timeoutMs) {
-  const env = proxyEnv();
-  if (!env) return Promise.reject(systemProxyUnavailableError());
   return new Promise((resolve, reject) => {
     const args = ['-L', '--fail', '--silent', '--show-error', '--max-time', String(Math.ceil(timeoutMs / 1000))];
     if (options?.method === 'POST') args.push('-X', 'POST');
     for (const [key, value] of Object.entries(options?.headers ?? {})) args.push('-H', `${key}: ${value}`);
     if (options?.body != null) args.push('--data-binary', String(options.body));
     args.push(url);
-    const child = spawn('curl', args, { env, windowsHide: true });
+    const child = spawn(CURL_BIN, args, { env: process.env, windowsHide: true });
     const chunks = [];
     const errors = [];
     const timer = setTimeout(() => {
@@ -151,13 +145,13 @@ function fetchByCurl(url, options, timeoutMs) {
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code === 0) resolve(Buffer.concat(chunks));
-      else reject(new Error(`curl exit ${code}: ${Buffer.concat(errors).toString('utf8').trim()}`));
+      else reject(new Error(`curl exit ${code}: ${Buffer.concat(errors).toString('utf8').replace(/\0/g, '').trim()}`));
     });
   });
 }
 
-async function fetchBuffer(url, options = {}, timeoutMs = 60000, useSystemProxy = false) {
-  if (useSystemProxy) return fetchByCurl(url, options, timeoutMs);
+async function fetchBuffer(url, options = {}, timeoutMs = 60000, transport = 'node') {
+  if (transport === 'curl') return fetchByCurl(url, options, timeoutMs);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -173,8 +167,8 @@ async function fetchWithFallback(label, url, options = {}, timeoutMs = 60000) {
   const failures = [];
   for (const item of fetchPlan(url)) {
     try {
-      const buffer = await withRetries(`${label} ${item.label} ${item.url}`, () => fetchBuffer(item.url, options, timeoutMs, item.proxy));
-      if (item.url !== url || item.proxy) console.error(new Date().toISOString(), `${label} downloaded via ${item.label}`);
+      const buffer = await withRetries(`${label} ${item.label}`, () => fetchBuffer(item.url, options, timeoutMs, item.transport), 2);
+      console.error(new Date().toISOString(), `${label} downloaded via ${item.label}`);
       return buffer;
     } catch (error) {
       failures.push(`${item.label}: ${String(error?.message || error)}`);
@@ -184,12 +178,12 @@ async function fetchWithFallback(label, url, options = {}, timeoutMs = 60000) {
 }
 
 async function fetchJson(url) {
-  const buffer = await fetchWithFallback(`Fetch JSON ${url}`, url, {}, 60000);
+  const buffer = await fetchWithFallback('Fetch JSON', url, {}, 60000);
   return JSON.parse(buffer.toString('utf8'));
 }
 
 async function fetchBytes(url, options = {}, timeoutMs = 300000) {
-  return fetchWithFallback(`Fetch bytes ${url}`, url, options, timeoutMs);
+  return fetchWithFallback('Fetch bytes', url, options, timeoutMs);
 }
 
 async function postJson(url, payload) {
@@ -205,7 +199,7 @@ async function postJson(url, payload) {
 }
 
 function resolveDataUrl(remoteManifest) {
-  const path = remoteManifest.dataPath ?? remoteManifest.path;
+  const path = REMOTE_DATA_URL || remoteManifest.dataPath || remoteManifest.path;
   if (!path) throw new Error('Manifest missing dataPath/path');
   if (/^https?:\/\//i.test(path)) return path;
   return new URL(path, REMOTE_MANIFEST_URL).toString();
@@ -213,6 +207,28 @@ function resolveDataUrl(remoteManifest) {
 
 function sha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
+}
+
+function displayUrl(value) {
+  try {
+    const parsed = new URL(value);
+    parsed.username = '';
+    parsed.password = '';
+    if (parsed.search) parsed.search = '?<redacted>';
+    return parsed.toString();
+  } catch {
+    return String(value);
+  }
+}
+
+async function atomicWriteFile(path, content, encoding) {
+  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile(tempPath, content, encoding);
+    await rename(tempPath, path);
+  } finally {
+    await rm(tempPath, { force: true }).catch(() => {});
+  }
 }
 
 function decode(value) {
@@ -281,19 +297,32 @@ async function downloadLatestData(force = false) {
   lastUpdateCheck = new Date().toISOString();
   if (!force && local?.sha256 && remote?.sha256 && local.sha256 === remote.sha256 && existsSync(DATA_FILE)) {
     manifest = local;
+    lastUpdateResult = { updated: false, checkedAt: lastUpdateCheck, manifestGeneratedAt: local.generatedAt ?? null, manifestSha256: local.sha256 ?? null };
     return { updated: false, manifest: local };
   }
-  const bytes = await fetchBytes(resolveDataUrl(remote));
+  const dataUrl = resolveDataUrl(remote);
+  const bytes = await fetchBytes(dataUrl);
   if (remote.sha256) {
     const actual = sha256(bytes);
     if (actual !== remote.sha256) throw new Error(`Downloaded data sha256 mismatch: ${actual} !== ${remote.sha256}`);
   }
   const textValue = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes).toString('utf8') : bytes.toString('utf8');
-  await writeFile(GZIP_FILE, bytes);
-  await writeFile(DATA_FILE, textValue, 'utf8');
-  await writeFile(MANIFEST_FILE, JSON.stringify(remote, null, 2), 'utf8');
+  const parsed = JSON.parse(textValue);
+  for (const key of ['vns', 'characters', 'tags', 'traits']) {
+    if (!Array.isArray(parsed?.[key])) throw new Error(`Downloaded data missing array: ${key}`);
+  }
+  await atomicWriteFile(GZIP_FILE, bytes);
+  await atomicWriteFile(DATA_FILE, textValue, 'utf8');
+  await atomicWriteFile(MANIFEST_FILE, JSON.stringify(remote, null, 2), 'utf8');
   manifest = remote;
-  return { updated: true, manifest: remote };
+  lastUpdateResult = {
+    updated: true,
+    checkedAt: lastUpdateCheck,
+    manifestGeneratedAt: remote.generatedAt ?? null,
+    manifestSha256: remote.sha256 ?? null,
+    dataSource: displayUrl(dataUrl)
+  };
+  return { updated: true, manifest: remote, raw: parsed };
 }
 
 function commonPrefixLength(a, b) {
@@ -1471,8 +1500,7 @@ function classify(input) {
   return { kind, groups: groups.map((group) => ({ selected: itemMeta(group.selectedId, kind), alternatives: group.alternatives.map((id) => itemMeta(id, kind)) })) };
 }
 
-async function loadDataFromDisk() {
-  const raw = JSON.parse(await readFile(DATA_FILE, 'utf8'));
+function loadData(raw, loadedManifest) {
   data = decodeLocalData(raw);
   tagMeta = new Map(data.tags.map((tag) => [tag.id, tag]));
   traitMeta = new Map(data.traits.map((trait) => [trait.id, trait]));
@@ -1482,15 +1510,25 @@ async function loadDataFromDisk() {
   tagSearchIndexSpoilerOn = buildTagSearchIndex(true);
   traitSearchIndexSpoilerOff = buildTraitSearchIndex(false);
   traitSearchIndexSpoilerOn = buildTraitSearchIndex(true);
-  manifest = await readLocalManifest();
+  manifest = loadedManifest;
   lastDataLoad = new Date().toISOString();
+}
+
+async function loadDataFromDisk() {
+  const raw = JSON.parse(await readFile(DATA_FILE, 'utf8'));
+  loadData(raw, await readLocalManifest());
 }
 
 async function ensureData(forceUpdate = false) {
   if (loadingPromise) return loadingPromise;
   loadingPromise = (async () => {
-    if (forceUpdate || !existsSync(DATA_FILE)) await downloadLatestData(forceUpdate);
-    else manifest = await readLocalManifest();
+    if (forceUpdate || !existsSync(DATA_FILE)) {
+      const result = await downloadLatestData(forceUpdate);
+      if (result.updated) {
+        loadData(result.raw, result.manifest);
+        return data;
+      }
+    }
     await loadDataFromDisk();
     return data;
   })().finally(() => {
@@ -1500,9 +1538,16 @@ async function ensureData(forceUpdate = false) {
 }
 
 async function checkForUpdates(force = false) {
-  const result = await downloadLatestData(force);
-  if (result.updated || !data) await loadDataFromDisk();
-  return result;
+  if (updatePromise) return updatePromise;
+  updatePromise = (async () => {
+    const result = await downloadLatestData(force);
+    if (result.updated) loadData(result.raw, result.manifest);
+    else if (!data) await loadDataFromDisk();
+    return { updated: result.updated, manifest: result.manifest };
+  })().finally(() => {
+    updatePromise = null;
+  });
+  return updatePromise;
 }
 
 async function handleAction(payload) {
@@ -1510,7 +1555,28 @@ async function handleAction(payload) {
   const action = payload.action ?? payload.type ?? 'status';
   if (action === 'status') {
     const dataStat = existsSync(DATA_FILE) ? await stat(DATA_FILE) : null;
-    return { ok: true, action, generatedAt: data?.generatedAt, buildDateUtc8: data?.buildDateUtc8, manifestGeneratedAt: manifest?.generatedAt, manifestSha256: manifest?.sha256, vns: data?.vns.length ?? 0, characters: data?.characters.length ?? 0, tags: data?.tags.length ?? 0, traits: data?.traits.length ?? 0, dataBytes: dataStat?.size ?? 0, lastUpdateCheck, lastDataLoad };
+    return {
+      ok: true,
+      action,
+      generatedAt: data?.generatedAt,
+      buildDateUtc8: data?.buildDateUtc8,
+      manifestGeneratedAt: manifest?.generatedAt,
+      manifestSha256: manifest?.sha256,
+      vns: data?.vns.length ?? 0,
+      characters: data?.characters.length ?? 0,
+      tags: data?.tags.length ?? 0,
+      traits: data?.traits.length ?? 0,
+      dataBytes: dataStat?.size ?? 0,
+      dataDir: DATA_DIR,
+      manifestSource: displayUrl(REMOTE_MANIFEST_URL),
+      dataSource: displayUrl(REMOTE_DATA_URL || manifest?.dataPath || manifest?.path || ''),
+      updateOnStart: UPDATE_ON_START,
+      updateIntervalMs: UPDATE_INTERVAL_MS,
+      updateInProgress: Boolean(updatePromise),
+      lastUpdateCheck,
+      lastUpdateResult,
+      lastDataLoad
+    };
   }
   if (action === 'update') return { ok: true, action, ...(await checkForUpdates(Boolean(payload.force))) };
   if (action === 'search') return { ok: true, action, ...searchItems(payload) };
@@ -1540,11 +1606,41 @@ const cliForce = cliArgs.has('--force');
 
 if (cliUpdateOnly) {
   const result = await checkForUpdates(cliForce);
-  console.log(JSON.stringify({ ok: true, mode: 'update', updated: result.updated, manifestSha256: manifest?.sha256, generatedAt: data?.generatedAt, lastUpdateCheck, lastDataLoad, dataDir: DATA_DIR }));
+  console.log(JSON.stringify({
+    ok: true,
+    mode: 'update',
+    updated: result.updated,
+    manifestSha256: manifest?.sha256,
+    manifestGeneratedAt: manifest?.generatedAt,
+    generatedAt: data?.generatedAt,
+    lastUpdateCheck,
+    lastUpdateResult,
+    lastDataLoad,
+    dataDir: DATA_DIR,
+    manifestSource: displayUrl(REMOTE_MANIFEST_URL),
+    dataSource: displayUrl(REMOTE_DATA_URL || manifest?.dataPath || manifest?.path || '')
+  }));
 } else {
   await ensureData(false);
-  setInterval(() => checkForUpdates(false).catch((error) => console.error(new Date().toISOString(), String(error?.stack || error))), UPDATE_INTERVAL_MS).unref();
+  if (UPDATE_ON_START) {
+    checkForUpdates(false)
+      .then((result) => console.error(new Date().toISOString(), `Startup update check completed: updated=${result.updated}`))
+      .catch((error) => console.error(new Date().toISOString(), `Startup update check failed: ${String(error?.stack || error)}`));
+  }
+  if (UPDATE_INTERVAL_MS > 0) {
+    setInterval(() => checkForUpdates(false).catch((error) => console.error(new Date().toISOString(), String(error?.stack || error))), UPDATE_INTERVAL_MS).unref();
+  }
   server.listen(PORT, '127.0.0.1', () => {
-    console.log(JSON.stringify({ ok: true, url: `http://127.0.0.1:${PORT}`, dataDir: DATA_DIR, generatedAt: data?.generatedAt, manifestSha256: manifest?.sha256 }));
+    console.log(JSON.stringify({
+      ok: true,
+      url: `http://127.0.0.1:${PORT}`,
+      dataDir: DATA_DIR,
+      generatedAt: data?.generatedAt,
+      manifestSha256: manifest?.sha256,
+      manifestSource: displayUrl(REMOTE_MANIFEST_URL),
+      dataSource: displayUrl(REMOTE_DATA_URL || manifest?.dataPath || manifest?.path || ''),
+      updateOnStart: UPDATE_ON_START,
+      updateIntervalMs: UPDATE_INTERVAL_MS
+    }));
   });
 }

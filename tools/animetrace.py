@@ -204,7 +204,7 @@ async def run_animetrace_playwright(image: Path, ctx: dict[str, Any]) -> dict[st
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
-    timeout = max(DEFAULT_WAIT_MS / 1000 + 30, 60)
+    timeout = max(DEFAULT_WAIT_MS / 1000 + 60, 90)
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -325,6 +325,19 @@ def parse_search_json(text: str) -> Any | None:
         return None
 
 
+def search_response_error(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    code = value.get("code")
+    if code in (None, 0, "0"):
+        return None
+    message = value.get("message") or value.get("msg") or value.get("error")
+    if isinstance(message, (dict, list)):
+        message = json.dumps(message, ensure_ascii=False)
+    detail = short_line(message, 180) if message else "未提供错误说明"
+    return f"AnimeTrace 接口返回错误 {code}：{detail}"
+
+
 def summarize_body(body_text: str, limit: int = 1800) -> str:
     lines = []
     banned_prefixes = ("GET ", "POST ", "OPTIONS ", "HEAD ", "RESP ", "http://", "https://")
@@ -359,14 +372,18 @@ def sanitize_child_error(text: str, limit: int = 300) -> str:
 
 def is_unrecognized_landing_text(body_text: str) -> bool:
     text = str(body_text or "")
-    required = ["Anime and Galgame recognition", "File Upload", "Results will appear here after uploading an image"]
-    return all(value in text for value in required)
+    old_page = ["Anime and Galgame recognition", "File Upload", "Results will appear here after uploading an image"]
+    new_page = ["Drag & Drop Image", "Image supports drag and drop"]
+    return all(value in text for value in old_page) or all(value in text for value in new_page)
 
 
 def result_preview(result: dict[str, Any]) -> str:
     search_response = result.get("search_response") if isinstance(result.get("search_response"), dict) else {}
     search_text = str(search_response.get("text") or "") if isinstance(search_response, dict) else ""
     parsed = parse_search_json(search_text)
+    response_error = search_response_error(parsed)
+    if response_error:
+        return response_error
     candidates = collect_candidates(parsed) if parsed is not None else []
     if not candidates:
         candidates = collect_page_candidates(str(result.get("body_text") or ""))

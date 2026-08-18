@@ -11,6 +11,7 @@ import importlib.util
 
 import aiohttp
 import websockets
+from _drawing_gateway import health_ready_report
 
 COMMON_MODULE = Path(__file__).with_name("zhubi_ext_common.py")
 spec = importlib.util.spec_from_file_location("local_onebot_zhubi_ext_common_test", COMMON_MODULE)
@@ -318,6 +319,10 @@ async def _run_test(event: dict[str, Any], arg: str, ctx: dict[str, Any]) -> lis
     report(f"OneBot HTTP: {onebot_http_status} - {onebot_http_detail}")
     onebot_ws_status, onebot_ws_detail = await check_ws(onebot_ws, headers_onebot)
     report(f"OneBot WS: {onebot_ws_status} - {onebot_ws_detail}")
+    drawing_gateway_status, drawing_gateway_detail = await health_ready_report()
+    report(
+        f"Drawing Gateway: {drawing_gateway_status} - {drawing_gateway_detail}"
+    )
 
     if tool_infos:
         report()

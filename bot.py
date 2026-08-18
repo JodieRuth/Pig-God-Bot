@@ -732,8 +732,24 @@ def compact_payload(value: Any) -> Any:
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():
-            if key.lower() in {"authorization", "api_key", "key"}:
+            normalized_key = key.lower()
+            if normalized_key in {
+                "authorization",
+                "api_key",
+                "key",
+                "password",
+                "x-api-key",
+            }:
                 result[key] = mask_secret(str(item))
+            elif normalized_key in {"prompt", "negative_prompt"}:
+                result[key] = "<prompt omitted>"
+            elif normalized_key == "message":
+                if isinstance(item, str):
+                    result[key] = f"<message chars={len(item)}>"
+                elif isinstance(item, list):
+                    result[key] = f"<message segments={len(item)}>"
+                else:
+                    result[key] = "<message omitted>"
             elif key in {"image_url"} and isinstance(item, dict) and "url" in item and str(item["url"]).startswith("data:image"):
                 result[key] = {"url": f"{str(item['url'])[:32]}...<base64 omitted>"}
             elif key in {"b64_json", "image_base64", "base64"}:
@@ -750,6 +766,33 @@ def compact_payload(value: Any) -> Any:
 
 def log_json(title: str, value: Any) -> None:
     log(f"{title}: {json.dumps(compact_payload(value), ensure_ascii=False, indent=2)}")
+
+
+def tool_result_for_log(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    if tool_name not in {
+        "drawing_generate_image",
+        "drawing_generation_status",
+    }:
+        return result
+    redacted = {key: value for key, value in result.items() if key != "content"}
+    redacted["content"] = "<temporary image credentials omitted>"
+    return redacted
+
+
+def tool_calls_for_log(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for tool_call in tool_calls:
+        item = dict(tool_call)
+        function = item.get("function")
+        if not isinstance(function, dict):
+            result.append(item)
+            continue
+        safe_function = dict(function)
+        if str(function.get("name") or "").strip().lower() == "drawing_generate_image":
+            safe_function["arguments"] = "<drawing generation arguments omitted>"
+        item["function"] = safe_function
+        result.append(item)
+    return result
 
 
 def sanitize_error_detail(value: Any, limit: int = 800) -> str:
@@ -1042,7 +1085,7 @@ def append_bot_context(event: dict[str, Any], message: str | list[dict[str, Any]
     if message_id is not None:
         record["message_id"] = message_id
     contexts[scope_key(event)].append(record)
-    log(f"Cached bot reply for context: scope={scope_key(event)} text={text[:200]!r}")
+    log(f"Cached bot reply for context: scope={scope_key(event)} text_len={len(text)}")
 
 
 def add_tool_image_context(event: dict[str, Any], path: Path, text: str) -> dict[str, Any]:
@@ -1607,9 +1650,21 @@ def select_system_prompt(user_id: int, scope_key: str) -> str:
     reload_runtime_files()
     bot_info = f"当前Bot QQ: {BOT_QQ}，Bot名称: {BOT_NAME or '（未设置）'}"
     response_instruction = "回答要求：请直接基于最后一条消息回答，必要时可用其中的 message_id 回复。"
+    image_tool_instruction = (
+        "图片工具分工（当相应工具可用时，本段优先于前文未区分模型的生图说明）："
+        "generate_image 是通用远程图片生成与编辑模型，任何带参考图的二次修改、修图、改风格、替换主体、扩图或多图合成，以及写实、产品、场景、文字排版等一般向生成都使用它；"
+        "drawing_generate_image 是 Drawing Gateway 的本地 A1111 图片模型，推荐用于没有参考图的二次元、动漫或游戏角色纯文生图，不接受参考图编辑。"
+        "同一请求只能选择一套生图工具，不得同时调用。"
+        "使用本地模型时，先调用 drawing_search_loras，再调用 drawing_prompt_suggestions；已安装目录没有所需 LoRA 时才调用 drawing_search_civitai，"
+        "下载仅限管理员，下载后用 drawing_download_status 等待成功并重新调用 drawing_search_loras 获取精确 managed identifier，然后才能调用 drawing_generate_image。"
+        "LoRA 只能通过 loras 参数传入，不能把 LoRA 语法写进 prompt；本地任务提交成功后会立即回复 job id，并在后台监控，完成后主动通知。"
+        "不得因为没有即时图片而重复提交；用户主动追问或机器人重启后，使用原 job id 调用 drawing_generation_status。"
+    )
     if is_admin_user(user_id):
-        return prompt_value("admin_system_prompt", scope_key).replace("{admin_users}", format_admin_users()) + "\n\n" + bot_info + "\n\n" + response_instruction
-    return prompt_value("system_prompt", scope_key) + "\n\n" + bot_info + "\n\n" + response_instruction
+        base_prompt = prompt_value("admin_system_prompt", scope_key).replace("{admin_users}", format_admin_users())
+    else:
+        base_prompt = prompt_value("system_prompt", scope_key)
+    return base_prompt + "\n\n" + image_tool_instruction + "\n\n" + bot_info + "\n\n" + response_instruction
 
 
 def select_tools(user_id: int) -> list[dict[str, Any]]:
@@ -1710,7 +1765,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
         }
         if use_stream:
             payload["stream"] = True
-        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "messages": request_messages, "tools": tool_names, "tool_choice": "auto", "parallel_tool_calls": False, "stream": use_stream}, "headers": headers})
+        log_json("LLM request", {"url": llm_url, "payload": {"model": llm_model, "message_count": len(request_messages), "message_roles": [str(item.get("role") or "") for item in request_messages if isinstance(item, dict)], "tools": tool_names, "tool_choice": "auto", "parallel_tool_calls": False, "stream": use_stream}, "headers": headers})
 
         async def request_chat_once() -> tuple[dict[str, Any], list[dict[str, Any]]]:
             await LLM_RPM_LIMITER.acquire()
@@ -1722,8 +1777,8 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                     async with session.post(llm_url, json=payload, timeout=600) as resp:
                         if resp.status >= 400:
                             text = await resp.text()
-                            log(f"LLM response status={resp.status} body={text[:1000]}")
-                            raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
+                            log(f"LLM response status={resp.status} body_chars={len(text)}")
+                            raise RuntimeError(f"LLM HTTP {resp.status}")
                         async for data_text in iter_sse_data(resp):
                             if not data_text or data_text == "[DONE]":
                                 continue
@@ -1765,9 +1820,9 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
             async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.post(llm_url, json=payload, timeout=600) as resp:
                     text = await resp.text()
-            log(f"LLM response status={resp.status} body={text[:1000]}")
+            log(f"LLM response status={resp.status} body_chars={len(text)}")
             if resp.status >= 400:
-                raise RuntimeError(f"LLM HTTP {resp.status}: {sanitize_error_detail(text[:1000])}")
+                raise RuntimeError(f"LLM HTTP {resp.status}")
             data = json.loads(text)
             non_stream_message = data["choices"][0]["message"]
             non_stream_tool_calls = non_stream_message.get("tool_calls") or []
@@ -1802,7 +1857,7 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                     tool_call_id_map[original_id] = normalized_id
                 tool_call["id"] = normalized_id
             log_json("LLM tool call id map", tool_call_id_map)
-            log_json("LLM tool calls", tool_calls)
+            log_json("LLM tool calls", tool_calls_for_log(tool_calls))
             assistant_content = message.get("content")
             assistant_message = {"role": "assistant", "content": assistant_content if isinstance(assistant_content, str) else "", "tool_calls": tool_calls}
             if "reasoning_content" in message:
@@ -1843,23 +1898,23 @@ async def call_chat_model(event: dict[str, Any], prompt: str, context_texts: lis
                 tool_call_id = str(tool_call.get("id") or uuid.uuid4().hex)
                 if tool_name in terminal_tool_names and result.get("ok") and has_context_mutating_tool:
                     messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
-                    log_json("Tool execution deferred", {"tool": tool_name, "result": result})
+                    log_json("Tool execution deferred", {"tool": tool_name, "result": tool_result_for_log(tool_name, result)})
                     continue
                 if result.get("answered") and result.get("ok"):
-                    log_json("Tool execution result", {"tool": tool_name, "result": result})
+                    log_json("Tool execution result", {"tool": tool_name, "result": tool_result_for_log(tool_name, result)})
                     return {"type": "answered_by_tool", "text": ""}
                 if tool_name in terminal_tool_names and result.get("ok"):
-                    log_json("Tool execution result", {"tool": tool_name, "result": result})
+                    log_json("Tool execution result", {"tool": tool_name, "result": tool_result_for_log(tool_name, result)})
                     return {"type": "answered_by_tool", "text": ""}
                 if tool_name in context_mutating_tool_names and result.get("ok"):
                     context_mutated_success = True
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_text})
-                log_json("Tool execution result", {"tool": tool_name, "result": result})
+                log_json("Tool execution result", {"tool": tool_name, "result": tool_result_for_log(tool_name, result)})
             if context_mutated_success and photo_enabled() and tool_runtime.get("images"):
                 messages.append({"role": "user", "content": build_updated_tool_image_content(tool_runtime.get("images", []))})
             continue
         reply_text = message.get("content") or ""
-        log(f"LLM reply parsed: {reply_text[:500]}")
+        log(f"LLM reply parsed: content_len={len(str(reply_text))}")
         return {"type": "text", "text": reply_text}
     raise RuntimeError("LLM 工具调用循环超过上限")
 
@@ -3202,9 +3257,9 @@ async def handle_event(event: dict[str, Any]) -> None:
         if event.get("message_type") == "group":
             at_bot = is_at_bot(message)
             reply_to_bot = await is_reply_to_bot(message, replied_message)
-            log(f"Group trigger check: at_bot={at_bot} reply_to_bot={reply_to_bot} raw_text={text[:200]!r}")
+            log(f"Group trigger check: at_bot={at_bot} reply_to_bot={reply_to_bot} raw_text_len={len(text)}")
             normalized_text = normalize_group_command_text(message, text)
-            log(f"Group normalized text: {normalized_text[:300]!r}")
+            log(f"Group normalized text: text_len={len(normalized_text)}")
             if bot_state.get("stopped") and not is_stopped_allowed_command_text(normalized_text):
                 log("Ignored group message while bot is stopped")
                 return
@@ -3265,7 +3320,7 @@ async def handle_event(event: dict[str, Any]) -> None:
         context_texts, recent_images = recent_context(key)
         allow_photos = photo_enabled()
         prompt = text.strip()
-        log(f"Prompt resolved before LLM: prompt_len={len(prompt)} prompt_preview={prompt[:300]!r}")
+        log(f"Prompt resolved before LLM: prompt_len={len(prompt)}")
         if not prompt:
             log("No prompt after normalization")
             return
@@ -3277,7 +3332,7 @@ async def handle_event(event: dict[str, Any]) -> None:
 
         result = await call_chat_with_tools(event, prompt, context_texts, images, int(event.get("user_id", 0)), system_prompt, tools)
         response = result.get("text") or ""
-        log(f"Sending text reply: {response[:500]!r}")
+        log(f"Sending text reply: response_len={len(response)}")
         if response:
             await reply(event, response)
     except Exception as exc:
