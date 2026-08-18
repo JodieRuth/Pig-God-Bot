@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -39,6 +40,15 @@ PASSTHROUGH_ENVIRONMENT_KEYS = (
     "WINDIR",
     "COMSPEC",
     "PATHEXT",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "PROGRAMDATA",
 )
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9_.:%-]+$")
 USER_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -314,6 +324,17 @@ def ssh_process_environment() -> dict[str, str]:
     }
 
 
+def launch_ssh(
+    command: list[str],
+    environment: Mapping[str, str],
+) -> int:
+    child_environment = dict(environment)
+    if os.name == "nt":
+        return subprocess.call(command, env=child_environment)
+    os.execve(command[0], command, child_environment)
+    return 0
+
+
 def safe_summary(config: DrawingGatewayTunnelConfig) -> dict[str, object]:
     return {
         "ok": True,
@@ -355,12 +376,25 @@ def main() -> int:
         print(json.dumps(safe_summary(config), ensure_ascii=False))
         return 0
     command = ssh_command(config)
-    os.execve(
-        str(config.ssh_executable),
-        command,
-        ssh_process_environment(),
-    )
-    return 0
+    try:
+        return launch_ssh(command, ssh_process_environment())
+    except KeyboardInterrupt:
+        return 130
+    except OSError as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": (
+                        "无法启动 OpenSSH 客户端："
+                        f"{clean_error(exc)}"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            file=os.sys.stderr,
+        )
+        return 3
 
 
 if __name__ == "__main__":
