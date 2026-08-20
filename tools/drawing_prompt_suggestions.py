@@ -18,7 +18,7 @@ def definition(ctx: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "drawing_prompt_suggestions",
-            "description": "为本地二次元纯文生图查询 Drawing Gateway 的 prompt 预设、LoRA 训练词、建议标签和示例 prompt。选定已安装 LoRA 后，应使用 drawing_search_loras 返回的精确 source/identifier 调用本工具，并把结果整理进最终标签式 prompt；指定 civitai_version_id 时只用于了解尚未下载版本的训练词和示例，不能据此直接生成。",
+            "description": "在 drawing_search_tags 完成规范 tag 查询后，为本地二次元纯文生图补充 Drawing Gateway 的 prompt 预设、LoRA 训练词、建议标签和示例 prompt。选定已安装 LoRA 后，应使用 drawing_search_loras 返回的精确 source/identifier 调用本工具，并把结果与已确认的 Danbooru tag 整理进最终标签式 prompt；指定 civitai_version_id 时只用于了解尚未下载版本的训练词和示例，不能据此直接生成。",
             "parameters": {
                 "type": "object",
                 "properties": {
