@@ -1757,6 +1757,8 @@ def select_system_prompt(user_id: int, scope_key: str) -> str:
         "同一请求只能选择一套生图工具，不得同时调用。"
         "使用本地模型时，先调用 drawing_search_loras，再调用 drawing_prompt_suggestions；已安装目录没有所需 LoRA 时才调用 drawing_search_civitai，"
         "下载仅限管理员，下载后用 drawing_download_status 等待成功并重新调用 drawing_search_loras 获取精确 managed identifier，然后才能调用 drawing_generate_image。"
+        "用户没有明确要求高清、精修或高质量时使用 quality_mode=standard；明确要求时使用 quality_mode=high，并优先使用 768x1024、1024x768 或更小的底图以及 batch_size=1。"
+        "high 档会自动使用已验证的 Hires fix；只有用户明确指定高级参数时才直接设置 enable_hr、hr_scale、hr_upscaler、hr_second_pass_steps 或 denoising_strength。"
         "LoRA 只能通过 loras 参数传入，不能把 LoRA 语法写进 prompt；本地任务提交成功后只回复机器人生成的八位任务 ID 和正在生成，完成后只发送图片链接。"
         "不得公开网关 job id、排队位置、密码、到期时间、seed、生成参数或内部等待方式；不得因为没有即时图片而重复提交。"
         "用户主动追问时使用八位任务 ID 调用 drawing_generation_status；管理员可用 /status <八位任务 ID> 停止等待，停止后不再发送结果，机器人重启前的任务 ID 无法恢复。"

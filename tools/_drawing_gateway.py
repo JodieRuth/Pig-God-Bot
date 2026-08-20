@@ -15,6 +15,21 @@ import aiohttp
 
 ACTIVE_GENERATION_STATUSES = {"queued", "running", "cancel_requested"}
 FINAL_GENERATION_STATUSES = {"cancelled", "succeeded", "failed"}
+SUPPORTED_HR_UPSCALERS = (
+    "None",
+    "Lanczos",
+    "Nearest",
+    "DAT x2",
+    "DAT x3",
+    "DAT x4",
+    "ESRGAN_4x",
+    "LDSR",
+    "R-ESRGAN 4x+",
+    "R-ESRGAN 4x+ Anime6B",
+    "ScuNET GAN",
+    "ScuNET PSNR",
+    "SwinIR 4x",
+)
 RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 ERROR_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 ERROR_DESCRIPTIONS = {
@@ -29,8 +44,11 @@ ERROR_DESCRIPTIONS = {
     "too_many_loras": "选择的 LoRA 数量超过网关限制",
     "too_many_prompts": "prompt 预设数量超过网关限制",
     "image_too_large": "图片尺寸超过网关限制",
+    "hires_image_too_large": "Hires 输出尺寸超过网关限制",
     "too_many_steps": "采样步数超过网关限制",
+    "too_many_hires_steps": "Hires 二阶段步数超过网关限制",
     "too_many_images": "单任务图片数量超过网关限制",
+    "unsupported_hr_upscaler": "不支持指定的 Hires 放大器",
     "lora_not_found": "LoRA 不存在",
     "lora_not_ready": "受管 LoRA 尚未安装完成",
     "lora_file_missing": "LoRA 文件缺失",
@@ -875,7 +893,7 @@ def generation_payload(args: dict[str, Any]) -> dict[str, Any]:
                 ),
             }
         )
-    return {
+    payload = {
         "prompt": prompt,
         "negative_prompt": negative_prompt,
         "prompt_preset_ids": preset_ids,
@@ -921,6 +939,83 @@ def generation_payload(args: dict[str, Any]) -> dict[str, Any]:
             maximum=8,
         ),
     }
+    quality_mode = None
+    if args.get("quality_mode") is not None:
+        quality_mode = choice_value(
+            args.get("quality_mode"),
+            "quality_mode",
+            {"standard", "high"},
+            default="standard",
+        )
+        payload["quality_mode"] = quality_mode
+    enable_hr = None
+    if args.get("enable_hr") is not None:
+        enable_hr = boolean_value(
+            args.get("enable_hr"),
+            "enable_hr",
+            default=False,
+        )
+        payload["enable_hr"] = enable_hr
+    hires_parameters: dict[str, Any] = {}
+    if args.get("hr_scale") is not None:
+        hr_scale = number_value(
+            args.get("hr_scale"),
+            "hr_scale",
+            default=1.5,
+            minimum=1.0,
+            maximum=2.0,
+        )
+        if hr_scale <= 1.0:
+            raise ValueError("hr_scale 必须大于 1。")
+        hires_parameters["hr_scale"] = hr_scale
+    if args.get("hr_upscaler") is not None:
+        hr_upscaler = string_value(
+            args.get("hr_upscaler"),
+            "hr_upscaler",
+            required=True,
+            maximum=128,
+        )
+        if hr_upscaler not in SUPPORTED_HR_UPSCALERS:
+            raise ValueError("hr_upscaler 不是当前服务器支持的放大器。")
+        hires_parameters["hr_upscaler"] = hr_upscaler
+    if args.get("hr_second_pass_steps") is not None:
+        hires_parameters["hr_second_pass_steps"] = integer_value(
+            args.get("hr_second_pass_steps"),
+            "hr_second_pass_steps",
+            minimum=1,
+            maximum=100,
+        )
+    if args.get("denoising_strength") is not None:
+        hires_parameters["denoising_strength"] = number_value(
+            args.get("denoising_strength"),
+            "denoising_strength",
+            default=0.4,
+            minimum=0.0,
+            maximum=1.0,
+        )
+    provided_hires = set(hires_parameters)
+    if enable_hr is False and provided_hires:
+        raise ValueError("enable_hr 为 false 时不能设置 Hires 参数。")
+    if quality_mode != "high" and enable_hr is not True and provided_hires:
+        raise ValueError(
+            "Hires 参数需要 quality_mode 为 high 或 enable_hr 为 true。"
+        )
+    if enable_hr is True and quality_mode != "high":
+        required_hires = {
+            "hr_scale",
+            "hr_upscaler",
+            "hr_second_pass_steps",
+            "denoising_strength",
+        }
+        missing_hires = sorted(required_hires - provided_hires)
+        if missing_hires:
+            raise ValueError(
+                "显式启用 Hires 时缺少参数："
+                + ", ".join(missing_hires)
+                + "。"
+            )
+    payload.update(hires_parameters)
+    return payload
 
 
 def _safe_generation_parameters(value: Any) -> dict[str, Any]:
@@ -936,9 +1031,17 @@ def _safe_generation_parameters(value: Any) -> dict[str, Any]:
         "seed",
         "batch_size",
         "n_iter",
+        "quality_mode",
+        "enable_hr",
+        "hr_scale",
+        "hr_upscaler",
+        "hr_second_pass_steps",
+        "denoising_strength",
     ):
         item = value.get(key)
-        if isinstance(item, str):
+        if isinstance(item, bool):
+            result[key] = item
+        elif isinstance(item, str):
             result[key] = clean_text(item, 128)
         elif isinstance(item, (int, float)) and not isinstance(item, bool):
             result[key] = item

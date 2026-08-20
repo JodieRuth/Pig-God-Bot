@@ -22,7 +22,7 @@ def definition(ctx: dict[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "codex_cli_investigate",
-            "description": "需要联网搜索或是复杂代码调查时使用。启动机器上的 Codex CLI，使用机器人当前启用的相同端点和模型、最高思考强度执行问题，只将 Codex 的最终回答回传。",
+            "description": "需要联网搜索或是复杂代码调查时使用。启动机器上的 Codex CLI，使用机器人当前启用的相同端点和模型、极高思考强度执行问题，只将 Codex 的最终回答回传。",
             "parameters": {
                 "type": "object",
                 "properties": {
